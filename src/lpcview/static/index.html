@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>lpcview</title>
+<link rel="stylesheet" href="/static/style.css">
+<script type="importmap">
+{ "imports": { "three": "/static/vendor/three.module.js" } }
+</script>
+</head>
+<body>
+<canvas id="view"></canvas>
+<div id="crosshair" hidden></div>
+
+<aside id="left" class="panel">
+  <header class="panel-head">
+    <span class="brand">lpcview</span>
+    <button id="toggle-left" class="icon" title="Collapse (H)">&#x2039;</button>
+  </header>
+  <div class="panel-body">
+    <section>
+      <label class="row"><span>File</span>
+        <select id="file-select"></select>
+      </label>
+      <label class="row"><span>Points to load</span>
+        <select id="budget-select">
+          <option value="1000000">1 M</option>
+          <option value="2000000">2 M</option>
+          <option value="5000000" selected>5 M</option>
+          <option value="10000000">10 M</option>
+          <option value="20000000">20 M</option>
+          <option value="all">all</option>
+        </select>
+      </label>
+      <div class="row">
+        <button id="load-btn" class="primary">Load</button>
+        <button id="stop-btn" disabled>Stop</button>
+      </div>
+      <div class="progress"><div id="progress-bar"></div></div>
+      <div id="status" class="status">pick a file and load it</div>
+    </section>
+
+    <section>
+      <h3>Colour</h3>
+      <label class="row"><span>By</span>
+        <select id="mode-select">
+          <option value="0">Elevation</option>
+          <option value="1">Intensity</option>
+          <option value="2">Classification</option>
+          <option value="3">Return number</option>
+          <option value="4">Number of returns</option>
+          <option value="5">Point source id</option>
+          <option value="6">GPS time</option>
+          <option value="7">Scan angle</option>
+          <option value="8">RGB</option>
+          <option value="9">Single return / first / last</option>
+        </select>
+      </label>
+      <label class="row"><span>Point size</span>
+        <input id="size-range" type="range" min="1" max="12" step="0.5" value="2">
+        <output id="size-out">2</output>
+      </label>
+      <label class="row check"><input id="adaptive-check" type="checkbox" checked> Bigger when near</label>
+      <label class="row check"><input id="bounds-check" type="checkbox" checked> Show extent box</label>
+      <label class="row"><span>Elevation range</span>
+        <select id="zrange-select">
+          <option value="p">1-99 percentile</option>
+          <option value="f">full</option>
+        </select>
+      </label>
+    </section>
+
+    <section>
+      <h3>Filter</h3>
+      <label class="row check"><input id="hide-withheld" type="checkbox" checked> Hide withheld</label>
+      <label class="row check"><input id="hide-overlap" type="checkbox"> Hide overlap</label>
+      <label class="row check"><input id="hide-synthetic" type="checkbox"> Hide synthetic</label>
+      <div class="row small">
+        <span>Classes</span>
+        <button id="classes-all" class="mini">all</button>
+        <button id="classes-none" class="mini">none</button>
+      </div>
+      <div id="class-list" class="class-list"><em>load a file</em></div>
+    </section>
+
+    <section>
+      <h3>Camera</h3>
+      <label class="row"><span>Speed</span>
+        <input id="speed-range" type="range" min="-1" max="3" step="0.05" value="1.7">
+        <output id="speed-out">50 m/s</output>
+      </label>
+      <div class="row">
+        <button id="fit-btn">Fit (F)</button>
+        <button id="top-btn">Top (T)</button>
+        <button id="eye-btn">Eye level (G)</button>
+      </div>
+      <div class="help">
+        <div><b>W A S D</b> move, <b>Q E</b> down/up, <b>Shift</b> fast, <b>Ctrl</b> slow</div>
+        <div><b>drag</b> look, <b>click</b> inspect a point, <b>L</b> lock the mouse, <b>wheel</b> speed</div>
+        <div><b>arrows</b> look, <b>H</b> hide panels, <b>Esc</b> release the mouse</div>
+      </div>
+    </section>
+  </div>
+</aside>
+<button id="show-left" class="edge-tab" hidden>&#x203A;</button>
+
+<aside id="right" class="panel">
+  <header class="panel-head tabs">
+    <button class="tab active" data-tab="point">Point</button>
+    <button class="tab" data-tab="stats">Stats</button>
+    <button class="tab" data-tab="header">Header</button>
+    <button class="tab" data-tab="vlrs">VLRs</button>
+    <button class="tab" data-tab="crs">CRS</button>
+    <button id="toggle-right" class="icon" title="Collapse">&#x203A;</button>
+  </header>
+  <div class="panel-body">
+    <div id="tab-point" class="tab-page"><em>click a point in the view to inspect it</em></div>
+    <div id="tab-stats" class="tab-page" hidden><em>load a file</em></div>
+    <div id="tab-header" class="tab-page" hidden><em>pick a file</em></div>
+    <div id="tab-vlrs" class="tab-page" hidden><em>pick a file</em></div>
+    <div id="tab-crs" class="tab-page" hidden><em>pick a file</em></div>
+  </div>
+</aside>
+<button id="show-right" class="edge-tab right" hidden>&#x2039;</button>
+
+<div id="hud">
+  <span id="hud-pos">-</span>
+  <span id="hud-look">-</span>
+  <span id="hud-pts">-</span>
+  <span id="hud-fps">-</span>
+</div>
+
+<script type="module" src="/static/app.js"></script>
+</body>
+</html>
