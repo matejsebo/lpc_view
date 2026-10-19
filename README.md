@@ -32,10 +32,14 @@ uv run lpcview info path/to/tile.laz --stats
 
 ## In the viewer
 
-- **Load** decodes the file on the server (a 170 MB LAZ of 28 M points takes
-  about ten seconds), computes its statistics, and streams a uniform random
-  sample of up to the chosen number of points into the view, drawing as it goes.
-  "all" loads every point; 20 M points take roughly 500 MB of GPU memory.
+- **Load** decodes the ticked files on the server (a 170 MB LAZ of 28 M points
+  takes about ten seconds), computes their statistics, and streams a uniform
+  random sample of up to the chosen number of points into the view, drawing as
+  it goes. Several files load as one mosaic, each contributing in proportion to
+  its size; the statistics and class list merge, and a picked point reports
+  which file it came from. "all" loads every point; 20 M points take roughly
+  500 MB of GPU memory. Decoded files stay in memory (`--max-loaded` caps how
+  many), so a 40 M point mosaic wants a few GB of RAM.
 - **Colour by** elevation, intensity, classification, return number, number of
   returns, point source id, GPS time, scan angle, RGB (when the file has it), or
   single/first/last return.
@@ -51,8 +55,8 @@ uv run lpcview info path/to/tile.laz --stats
   own lookup name, scan angle, flags, GPS time as UTC, and so on.
 - The right panel's tabs hold the picked point, the statistics (class counts,
   elevation, intensity, scan angle and time histograms, returns, point source
-  ids, flags), the header, the VLRs and the CRS. The metadata is also served as
-  JSON at `/api/meta?file=0`.
+  ids, flags), and the header, VLRs and CRS of the file chosen at the top of the
+  panel. The metadata is also served as JSON at `/api/meta?file=0`.
 
 ## Layout
 

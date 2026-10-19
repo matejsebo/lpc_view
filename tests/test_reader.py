@@ -6,6 +6,7 @@ import numpy as np
 from lpcview.classes import class_color, class_name
 from lpcview.reader import (
     CHUNK_MAGIC,
+    CloudSet,
     FLAG_WITHHELD,
     gps_time_to_utc,
     load_cloud,
@@ -104,25 +105,28 @@ def test_chunk_layout_and_order(sample_las):
     assert sorted(cloud.order.tolist()) == list(range(N_POINTS))
     assert cloud.order[:5].tolist() == load_cloud(sample_las).order[:5].tolist()
     n = 123
-    blob = cloud.pack_chunk(10, n)
+    cs = CloudSet([0], [cloud])
+    blob = cs.pack_chunk(10, n)
     assert blob[:4] == CHUNK_MAGIC
-    count, has_rgb, has_time, _ = struct.unpack_from("<IBBH", blob, 4)
-    assert (count, has_rgb, has_time) == (n, 0, 1)
-    expected = 12 + n * (12 + 2 + 1 + 1 + 1 + 2 + 4 + 4 + 1)
+    count, has_rgb, has_time, nseg = struct.unpack_from("<IBBH", blob, 4)
+    assert (count, has_rgb, has_time, nseg) == (n, 0, 1, 1)
+    assert struct.unpack_from("<III", blob, 12) == (0, 10, n)
+    head = 12 + 12
+    expected = head + n * (12 + 2 + 1 + 1 + 1 + 2 + 4 + 4 + 1)
     assert len(blob) == expected
-    pos = np.frombuffer(blob, dtype="<f4", count=3 * n, offset=12).reshape(n, 3)
+    pos = np.frombuffer(blob, dtype="<f4", count=3 * n, offset=head).reshape(n, 3)
     idx = cloud.order[10 : 10 + n]
     assert np.allclose(pos, (cloud.xyz(idx) - cloud.center), atol=1e-3)
-    off = 12 + 12 * n
+    off = head + 12 * n
     intensity = np.frombuffer(blob, dtype="<u2", count=n, offset=off)
     assert np.array_equal(intensity, cloud.intensity[idx])
     off += 2 * n
     cls = np.frombuffer(blob, dtype=np.uint8, count=n, offset=off)
     assert np.array_equal(cls, cloud.classification[idx])
     # Out-of-range requests clip rather than fail.
-    tail = cloud.pack_chunk(N_POINTS - 5, 1000)
+    tail = cs.pack_chunk(N_POINTS - 5, 1000)
     assert struct.unpack_from("<I", tail, 4)[0] == 5
-    assert struct.unpack_from("<I", cloud.pack_chunk(N_POINTS + 10, 5), 4)[0] == 0
+    assert struct.unpack_from("<I", cs.pack_chunk(N_POINTS + 10, 5), 4)[0] == 0
 
 
 def test_point_record_is_exact(sample_las):

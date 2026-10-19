@@ -76,6 +76,8 @@ def main(argv: list[str] | None = None) -> int:
     p_serve.add_argument("--host", default="127.0.0.1")
     p_serve.add_argument("--port", type=int, default=8765)
     p_serve.add_argument("--open", action="store_true", help="open the page in the default browser")
+    p_serve.add_argument("--max-loaded", type=int, default=64,
+                         help="how many decoded files to keep in memory at once (default 64)")
 
     p_info = sub.add_parser("info", help="print a file's metadata")
     p_info.add_argument("path")
@@ -92,7 +94,7 @@ def main(argv: list[str] | None = None) -> int:
         if not files:
             print("lpcview: no LAS/LAZ files found", file=sys.stderr)
             return 2
-        serve(files, host=args.host, port=args.port, open_browser=args.open)
+        serve(files, host=args.host, port=args.port, open_browser=args.open, max_loaded=args.max_loaded)
         return 0
     if args.command == "info":
         meta = read_metadata(args.path)

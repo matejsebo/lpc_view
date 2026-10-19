@@ -20,9 +20,13 @@
   </header>
   <div class="panel-body">
     <section>
-      <label class="row"><span>File</span>
-        <select id="file-select"></select>
-      </label>
+      <div class="row small">
+        <span>Files</span>
+        <button id="files-all" class="mini">all</button>
+        <button id="files-none" class="mini">none</button>
+        <span id="files-count" class="ct"></span>
+      </div>
+      <div id="file-list" class="class-list file-list"><em>listing...</em></div>
       <label class="row"><span>Points to load</span>
         <select id="budget-select">
           <option value="1000000">1 M</option>
@@ -115,6 +119,7 @@
     <button id="toggle-right" class="icon" title="Collapse">&#x203A;</button>
   </header>
   <div class="panel-body">
+    <label class="row meta-file"><span>File</span><select id="meta-file"></select></label>
     <div id="tab-point" class="tab-page"><em>click a point in the view to inspect it</em></div>
     <div id="tab-stats" class="tab-page" hidden><em>load a file</em></div>
     <div id="tab-header" class="tab-page" hidden><em>pick a file</em></div>

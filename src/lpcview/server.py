@@ -5,10 +5,12 @@ Routes:
   GET /static/<file>            its scripts, styles and the vendored three.js
   GET /api/files                the files on offer: id, name, size, point count
   GET /api/meta?file=<id>       header, VLRs, EVLRs, CRS (no point decoding)
-  GET /api/load?file=<id>       decode the points (once); returns the statistics
-  GET /api/points?file=<id>&start=<n>&count=<n>
-                                a binary chunk in the shuffled stream order
-  GET /api/point?file=<id>&i=<stream index>
+  GET /api/load?files=<id,id,..>
+                                decode those files (once each); returns the merged
+                                statistics, point count and centre
+  GET /api/points?files=<id,..>&start=<n>&count=<n>
+                                a binary chunk of the merged stream (reader.CloudSet)
+  GET /api/point?file=<id>&i=<index in that file's shuffled order>
                                 every attribute of one point, exact, with lat/lon
   GET /api/sha256?file=<id>     the file's SHA-256 (slow on big files)
 """
@@ -28,7 +30,7 @@ from urllib.parse import parse_qs, urlsplit
 
 import laspy
 
-from .reader import PointCloud, file_sha256, load_cloud, read_metadata
+from .reader import CloudSet, PointCloud, file_sha256, load_cloud, read_metadata
 
 STATIC_DIR = Path(__file__).parent / "static"
 LAS_SUFFIXES = {".las", ".laz"}
@@ -58,10 +60,11 @@ def find_files(paths: list[str | Path]) -> list[Path]:
 class Catalog:
     """The files on offer and the clouds decoded so far, with one lock per file."""
 
-    def __init__(self, files: list[Path], max_loaded: int = 2) -> None:
+    def __init__(self, files: list[Path], max_loaded: int = 64) -> None:
         self.files = files
-        self.max_loaded = max_loaded
+        self.max_loaded = max(1, max_loaded)
         self._clouds: dict[int, PointCloud] = {}
+        self._sets: dict[tuple[int, ...], CloudSet] = {}
         self._meta: dict[int, dict[str, Any]] = {}
         self._locks = [threading.Lock() for _ in files]
         self._recent: list[int] = []
@@ -121,7 +124,18 @@ class Catalog:
             del self._clouds[victim]
             self._recent.remove(victim)
             self._transformers.pop(victim, None)
+            self._sets = {key: v for key, v in self._sets.items() if victim not in key}
             print(f"[lpcview] released {self.files[victim].name}")
+
+    def cloud_set(self, ids: list[int]) -> CloudSet:
+        """The clouds of `ids` as one stream; decoded on first use, cached as a set."""
+        key = tuple(ids)
+        if key not in self._sets:
+            clouds = [self.cloud(i) for i in ids]
+            cs = CloudSet(list(ids), clouds)
+            cs.stats()
+            self._sets[key] = cs
+        return self._sets[key]
 
     def lonlat(self, i: int, x: float, y: float) -> tuple[float, float] | None:
         """WGS84 longitude/latitude of a point, when the file's CRS is known."""
@@ -188,6 +202,23 @@ class Handler(SimpleHTTPRequestHandler):
             raise IndexError(i)
         return i
 
+    def _file_ids(self, q: dict[str, list[str]]) -> list[int]:
+        """`files=0,3,4` (or a single `file=`), in order, without repeats."""
+        raw = q.get("files", q.get("file", ["0"]))[0]
+        ids: list[int] = []
+        for part in raw.split(","):
+            part = part.strip()
+            if not part:
+                continue
+            i = int(part)
+            if not 0 <= i < len(self.catalog.files):
+                raise IndexError(i)
+            if i not in ids:
+                ids.append(i)
+        if not ids:
+            raise ValueError("no files given")
+        return ids
+
     # -- routing ---------------------------------------------------------------
 
     def do_GET(self) -> None:  # noqa: N802 - http.server API
@@ -200,7 +231,7 @@ class Handler(SimpleHTTPRequestHandler):
             return super().do_GET()
         if parts.path.startswith("/api/"):
             try:
-                self._api(parts.path[len("/api/") :], parse_qs(parts.query))
+                self._api(parts.path[len("/api/") :], parse_qs(parts.query, keep_blank_values=True))
             except (IndexError, ValueError, KeyError) as exc:
                 self._send_json({"error": f"bad request: {exc}"}, HTTPStatus.BAD_REQUEST)
             except FileNotFoundError as exc:
@@ -218,20 +249,21 @@ class Handler(SimpleHTTPRequestHandler):
         elif route == "meta":
             self._send_json(cat.meta(self._file_id(q)))
         elif route == "load":
-            i = self._file_id(q)
-            cloud = cat.cloud(i)
+            ids = self._file_ids(q)
+            cs = cat.cloud_set(ids)
             self._send_json(
                 {
-                    "point_count": cloud.count,
-                    "center": [float(v) for v in cloud.center],
-                    "stats": cloud.stats(),
+                    "files": ids,
+                    "point_count": cs.count,
+                    "center": [float(v) for v in cs.center],
+                    "stats": cs.stats(),
                 }
             )
         elif route == "points":
-            i = self._file_id(q)
+            ids = self._file_ids(q)
             start = int(q.get("start", ["0"])[0])
             count = int(q.get("count", ["1000000"])[0])
-            self._send_bytes(cat.cloud(i).pack_chunk(start, count))
+            self._send_bytes(cat.cloud_set(ids).pack_chunk(start, count))
         elif route == "point":
             i = self._file_id(q)
             k = int(q.get("i", ["0"])[0])
@@ -247,17 +279,17 @@ class Handler(SimpleHTTPRequestHandler):
             self._send_json({"error": "no such route"}, HTTPStatus.NOT_FOUND)
 
 
-def make_server(files: list[Path], host: str = "127.0.0.1", port: int = 8765) -> ThreadingHTTPServer:
-    catalog = Catalog(files)
+def make_server(files: list[Path], host: str = "127.0.0.1", port: int = 8765, max_loaded: int = 64) -> ThreadingHTTPServer:
+    catalog = Catalog(files, max_loaded=max_loaded)
     handler = partial(Handler, catalog=catalog)
     server = ThreadingHTTPServer((host, port), handler)
     server.daemon_threads = True
     return server
 
 
-def serve(files: list[Path], host: str = "127.0.0.1", port: int = 8765, open_browser: bool = False) -> None:
+def serve(files: list[Path], host: str = "127.0.0.1", port: int = 8765, open_browser: bool = False, max_loaded: int = 64) -> None:
     mimetypes.add_type("application/javascript", ".js")
-    server = make_server(files, host, port)
+    server = make_server(files, host, port, max_loaded=max_loaded)
     url = f"http://{host}:{server.server_address[1]}/"
     print(f"[lpcview] serving {len(files)} file(s) at {url}")
     for p in files:

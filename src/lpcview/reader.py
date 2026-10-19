@@ -23,7 +23,7 @@ import numpy as np
 
 from .classes import class_color, class_name
 
-CHUNK_MAGIC = b"LPC1"
+CHUNK_MAGIC = b"LPC2"
 GPS_EPOCH = dt.datetime(1980, 1, 6, tzinfo=dt.timezone.utc)
 GPS_UTC_LEAP_SECONDS = 18  # since 2017-01-01; the LAS header does not say
 ADJUSTED_GPS_OFFSET = 1.0e9
@@ -407,40 +407,27 @@ class PointCloud:
 
     # -- the stream ----------------------------------------------------------
 
-    def pack_chunk(self, start: int, count: int) -> bytes:
-        """Points [start, start+count) of the shuffled order as one binary chunk.
+    def slice_arrays(self, idx: np.ndarray, center: np.ndarray, t0: float) -> dict[str, np.ndarray]:
+        """The streamed attributes of the given points, positions relative to `center`.
 
-        Layout (little endian): magic 'LPC1', count u32, has_rgb u8, has_time u8,
-        pad u16; then xyz f32 x3 relative to `center`, intensity u16, classification
-        u8, return_number u8, number_of_returns u8, point_source_id u16, scan_angle
-        f32, gps_time f32 (relative to the file's minimum), flags u8, rgb u8 x3 when
-        has_rgb.
+        gps_time comes back relative to `t0` as float32; rgb is zeros when the file
+        has none, so that files with and without colour can share one stream.
         """
-        start = max(0, min(start, self.count))
-        count = max(0, min(count, self.count - start))
-        idx = self.order[start : start + count]
-        rel = (self.xyz(idx) - self.center).astype(np.float32)
-        parts = [
-            CHUNK_MAGIC,
-            struct.pack("<IBBH", count, 1 if self.rgb is not None else 0,
-                        1 if self.gps_time is not None else 0, 0),
-            np.ascontiguousarray(rel).tobytes(),
-            self.intensity[idx].astype("<u2").tobytes(),
-            self.classification[idx].astype(np.uint8).tobytes(),
-            self.return_number[idx].astype(np.uint8).tobytes(),
-            self.number_of_returns[idx].astype(np.uint8).tobytes(),
-            self.point_source_id[idx].astype("<u2").tobytes(),
-            self.scan_angle[idx].astype("<f4").tobytes(),
-        ]
-        if self.gps_time is not None:
-            t0 = self.stats()["gps_time"]["min"]
-            parts.append((self.gps_time[idx] - t0).astype("<f4").tobytes())
-        else:
-            parts.append(np.zeros(count, dtype="<f4").tobytes())
-        parts.append(self.flags[idx].astype(np.uint8).tobytes())
-        if self.rgb is not None:
-            parts.append(np.ascontiguousarray(self.rgb[idx]).tobytes())
-        return b"".join(parts)
+        n = len(idx)
+        return {
+            "xyz": np.ascontiguousarray((self.xyz(idx) - center).astype(np.float32)),
+            "intensity": self.intensity[idx].astype("<u2"),
+            "classification": self.classification[idx].astype(np.uint8),
+            "return_number": self.return_number[idx].astype(np.uint8),
+            "number_of_returns": self.number_of_returns[idx].astype(np.uint8),
+            "point_source_id": self.point_source_id[idx].astype("<u2"),
+            "scan_angle": self.scan_angle[idx].astype("<f4"),
+            "gps_time": (self.gps_time[idx] - t0).astype("<f4")
+            if self.gps_time is not None
+            else np.zeros(n, dtype="<f4"),
+            "flags": self.flags[idx].astype(np.uint8),
+            "rgb": np.ascontiguousarray(self.rgb[idx]) if self.rgb is not None else np.zeros((n, 3), np.uint8),
+        }
 
     # -- one point, exactly --------------------------------------------------
 
@@ -681,3 +668,194 @@ def load_cloud(path: str | os.PathLike[str], max_points: int | None = None) -> P
         gps_time_type=gps_type,
         class_lookup=lookup,
     )
+
+
+# ----------------------------------------------------------------------------
+# Several clouds as one stream
+# ----------------------------------------------------------------------------
+
+STREAM_FIELDS = (
+    "xyz", "intensity", "classification", "return_number", "number_of_returns",
+    "point_source_id", "scan_angle", "gps_time", "flags", "rgb",
+)
+SAMPLE_PER_CLOUD = 1_000_000  # points per file behind the merged percentiles
+
+
+def _values(cloud: PointCloud, name: str) -> np.ndarray | None:
+    if name == "z":
+        return cloud.Z.astype(np.float64) * cloud.scale[2] + cloud.offset[2]
+    if name == "gps_time":
+        return cloud.gps_time
+    return getattr(cloud, name)
+
+
+class CloudSet:
+    """Clouds streamed together: a uniform mix, each file in proportion to its size.
+
+    Stream position p holds, from cloud k, its shuffled points below floor(p*n_k/N),
+    so every chunk [start, start+count) is a fixed set of per-cloud slices and a
+    prefix of any length is a uniform sample of the whole. The chunk header lists
+    those slices so the viewer can map a point back to its file.
+
+    Layout (little endian): magic 'LPC2', count u32, has_rgb u8, has_time u8,
+    nseg u16; nseg x (file id u32, local start u32, count u32); then the arrays of
+    `PointCloud.slice_arrays` concatenated across the slices: xyz f32 x3,
+    intensity u16, classification u8, return_number u8, number_of_returns u8,
+    point_source_id u16, scan_angle f32, gps_time f32, flags u8, rgb u8 x3 (only
+    when has_rgb).
+    """
+
+    def __init__(self, ids: list[int], clouds: list[PointCloud]) -> None:
+        if not clouds:
+            raise ValueError("a CloudSet needs at least one cloud")
+        self.ids = list(ids)
+        self.clouds = list(clouds)
+        self.count = sum(c.count for c in clouds)
+        filled = [c for c in clouds if c.count]
+        if filled:
+            mins = np.min([c.stats()["bounds"]["min"] for c in filled], axis=0)
+            maxs = np.max([c.stats()["bounds"]["max"] for c in filled], axis=0)
+            self.center = (np.asarray(mins, dtype=np.float64) + np.asarray(maxs, dtype=np.float64)) / 2.0
+        else:
+            self.center = np.zeros(3)
+        self._stats: dict[str, Any] | None = None
+
+    def segments(self, start: int, count: int) -> list[tuple[int, int, int]]:
+        """(cloud index, local start, count) for stream positions [start, start+count)."""
+        start = max(0, min(start, self.count))
+        end = max(start, min(start + count, self.count))
+        segs = []
+        for k, c in enumerate(self.clouds):
+            a = start * c.count // self.count if self.count else 0
+            b = end * c.count // self.count if self.count else 0
+            if b > a:
+                segs.append((k, a, b - a))
+        return segs
+
+    def pack_chunk(self, start: int, count: int) -> bytes:
+        segs = self.segments(start, count)
+        t0 = self.stats().get("gps_time", {}).get("min", 0.0)
+        has_rgb = any(c.rgb is not None for c in self.clouds)
+        has_time = any(c.gps_time is not None for c in self.clouds)
+        parts: dict[str, list[np.ndarray]] = {f: [] for f in STREAM_FIELDS}
+        for k, a, n in segs:
+            c = self.clouds[k]
+            arrays = c.slice_arrays(c.order[a : a + n], self.center, t0)
+            for f in STREAM_FIELDS:
+                parts[f].append(arrays[f])
+        total = sum(n for _, _, n in segs)
+        head = [CHUNK_MAGIC, struct.pack("<IBBH", total, int(has_rgb), int(has_time), len(segs))]
+        for k, a, n in segs:
+            head.append(struct.pack("<III", self.ids[k], a, n))
+        body = []
+        for f in STREAM_FIELDS:
+            if f == "rgb" and not has_rgb:
+                continue
+            body.append(np.concatenate(parts[f]).tobytes() if parts[f] else b"")
+        return b"".join(head + body)
+
+    def stats(self) -> dict[str, Any]:
+        if self._stats is None:
+            if len(self.clouds) == 1:
+                self._stats = self.clouds[0].stats()
+            else:
+                self._stats = _json_safe(self._merged_stats())
+        return self._stats
+
+    def _merged_stats(self) -> dict[str, Any]:
+        clouds = [c for c in self.clouds if c.count]
+        n = self.count
+        out: dict[str, Any] = {
+            "point_count": n,
+            "files": [{"id": i, "name": Path(c.path).name, "count": c.count} for i, c in zip(self.ids, self.clouds)],
+        }
+        if n == 0:
+            return out
+        mins = np.min([c.stats()["bounds"]["min"] for c in clouds], axis=0).tolist()
+        maxs = np.max([c.stats()["bounds"]["max"] for c in clouds], axis=0).tolist()
+        out["bounds"] = {"min": mins, "max": maxs}
+        area = (maxs[0] - mins[0]) * (maxs[1] - mins[1])
+        out["density_per_m2"] = float(n / area) if area > 0 else None
+        out["density_note"] = "over the bounding box of all files"
+
+        def merged_ranged(name: str, bins: int, percentiles=(1, 5, 50, 95, 99)) -> dict[str, Any] | None:
+            have = [c for c in clouds if _values(c, name) is not None]
+            if not have:
+                return None
+            arrays = [_values(c, name).astype(np.float64) for c in have]
+            lo = min(float(v.min()) for v in arrays)
+            hi = max(float(v.max()) for v in arrays)
+            counts = np.array([c.count for c in have], dtype=np.float64)
+            means = np.array([float(v.mean()) for v in arrays])
+            stds = np.array([float(v.std()) for v in arrays])
+            mean = float((counts * means).sum() / counts.sum())
+            var = float((counts * (stds**2 + (means - mean) ** 2)).sum() / counts.sum())
+            edges = np.linspace(lo, hi if hi > lo else lo + 1.0, bins + 1)
+            hist = np.zeros(bins, dtype=np.int64)
+            samples = []
+            for c, v in zip(have, arrays):
+                hist += np.histogram(v, bins=edges)[0]
+                samples.append(v[c.order[: min(c.count, SAMPLE_PER_CLOUD)]])
+            q = np.percentile(np.concatenate(samples), percentiles)
+            return {
+                "min": lo, "max": hi, "mean": mean, "std": math.sqrt(var),
+                "percentiles": {str(p): float(x) for p, x in zip(percentiles, q)},
+                "percentiles_note": f"from a sample of up to {SAMPLE_PER_CLOUD} points per file",
+                "histogram": {"edges": edges.tolist(), "counts": hist.tolist()},
+            }
+
+        out["z"] = merged_ranged("z", 64)
+        out["intensity"] = merged_ranged("intensity", 64)
+        out["scan_angle_deg"] = merged_ranged("scan_angle", 45, percentiles=(1, 50, 99))
+
+        def merged_counts(key: str, limit: int = 256) -> list[dict[str, Any]]:
+            acc: dict[int, int] = {}
+            for c in clouds:
+                for row in c.stats().get(key, []):
+                    acc[row["value"]] = acc.get(row["value"], 0) + row["count"]
+            rows = [{"value": v, "count": k, "fraction": k / n} for v, k in acc.items()]
+            rows.sort(key=lambda r: -r["count"])
+            return rows[:limit]
+
+        classes = []
+        for row in merged_counts("classification"):
+            code = row["value"]
+            names = {c.class_label(code) for c in clouds}
+            classes.append({**row, "name": " / ".join(sorted(names)), "color": list(class_color(code))})
+        out["classification"] = classes
+        out["return_number"] = merged_counts("return_number")
+        out["number_of_returns"] = merged_counts("number_of_returns")
+        out["point_source_id"] = merged_counts("point_source_id", 64)
+        out["point_source_id_unique"] = len({r["value"] for c in clouds for r in c.stats()["point_source_id"]})
+        out["user_data"] = merged_counts("user_data", 16)
+        if any("scanner_channel" in c.stats() for c in clouds):
+            out["scanner_channel"] = merged_counts("scanner_channel")
+        flags: dict[str, int] = {}
+        for c in clouds:
+            for k, v in c.stats()["flags"].items():
+                flags[k] = flags.get(k, 0) + v
+        out["flags"] = flags
+        out["ground_points"] = sum(c.stats()["ground_points"] for c in clouds)
+        out["ground_density_per_m2"] = float(out["ground_points"] / area) if area > 0 else None
+        timed = [c for c in clouds if c.gps_time is not None]
+        if timed:
+            g = merged_ranged("gps_time", 96, percentiles=(1, 50, 99))
+            types = {c.gps_time_type for c in timed}
+            gtype = types.pop() if len(types) == 1 else "mixed"
+            out["gps_time"] = {
+                "type": gtype,
+                "min": g["min"], "max": g["max"], "span_seconds": g["max"] - g["min"],
+                "min_utc": gps_time_to_utc(g["min"], gtype), "max_utc": gps_time_to_utc(g["max"], gtype),
+                "leap_seconds_assumed": GPS_UTC_LEAP_SECONDS,
+                "histogram": g["histogram"],
+            }
+        coloured = [c for c in clouds if c.rgb is not None]
+        if coloured:
+            out["rgb"] = {}
+            for k, name in enumerate(("red", "green", "blue")):
+                vals = [c.rgb[:, k] for c in coloured]
+                out["rgb"][name] = {
+                    "min": min(int(v.min()) for v in vals), "max": max(int(v.max()) for v in vals),
+                    "mean": float(np.mean([float(v.mean()) for v in vals])), "std": 0.0, "percentiles": {},
+                }
+        return out

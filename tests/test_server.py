@@ -57,12 +57,23 @@ def test_meta_load_points_point(server):
     assert meta["file"]["compressed"] is True
     status, body, _ = get(server + "/api/load?file=1")
     info = json.loads(body)
-    assert info["point_count"] == N_POINTS
+    assert info["point_count"] == N_POINTS and info["files"] == [1]
     assert len(info["center"]) == 3
     assert info["stats"]["classification"][0]["count"] > 0
     status, body, ctype = get(server + "/api/points?file=1&start=0&count=100")
     assert status == 200 and ctype == "application/octet-stream"
-    assert body[:4] == b"LPC1" and struct.unpack_from("<I", body, 4)[0] == 100
+    assert body[:4] == b"LPC2" and struct.unpack_from("<I", body, 4)[0] == 100
+    assert struct.unpack_from("<III", body, 12) == (1, 0, 100)
+    # Both files as one stream.
+    status, body, _ = get(server + "/api/load?files=0,1,1")
+    info = json.loads(body)
+    assert info["files"] == [0, 1] and info["point_count"] == 2 * N_POINTS
+    assert [f["count"] for f in info["stats"]["files"]] == [N_POINTS, N_POINTS]
+    status, body, _ = get(server + "/api/points?files=0,1&start=0&count=100")
+    count, _, _, nseg = struct.unpack_from("<IBBH", body, 4)
+    assert count == 100 and nseg == 2
+    assert struct.unpack_from("<III", body, 12) == (0, 0, 50)
+    assert struct.unpack_from("<III", body, 24) == (1, 0, 50)
     status, body, _ = get(server + "/api/point?file=1&i=3")
     rec = json.loads(body)
     assert rec["stream_index"] == 3
@@ -75,6 +86,10 @@ def test_meta_load_points_point(server):
 def test_errors_are_json(server):
     status, body, _ = get(server + "/api/meta?file=9")
     assert status == 400 and "error" in json.loads(body)
+    status, body, _ = get(server + "/api/load?files=0,9")
+    assert status == 400
+    status, body, _ = get(server + "/api/load?files=")
+    assert status == 400
     status, body, _ = get(server + "/api/point?file=0&i=999999")
     assert status == 400
     status, body, _ = get(server + "/api/nothing")

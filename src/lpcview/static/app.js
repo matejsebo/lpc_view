@@ -11,7 +11,9 @@ import * as THREE from "three";
 const $ = (id) => document.getElementById(id);
 const canvas = $("view");
 const ui = {
-  fileSelect: $("file-select"),
+  fileList: $("file-list"),
+  filesCount: $("files-count"),
+  metaFile: $("meta-file"),
   budgetSelect: $("budget-select"),
   loadBtn: $("load-btn"),
   stopBtn: $("stop-btn"),
@@ -246,9 +248,24 @@ let geometry = null;     // its BufferGeometry
 let boundsHelper = null;
 let marker = null;
 const cloud = {          // the loaded cloud's arrays and bookkeeping
-  fileId: null, meta: null, stats: null, center: [0, 0, 0], count: 0, budget: 0, loaded: 0,
+  fileIds: [], stats: null, center: [0, 0, 0], count: 0, budget: 0, loaded: 0,
   hasRgb: false, hasTime: false, arrays: null,
+  segments: [],          // {start, file, local, count}: which file each stream index came from
 };
+let files = [];          // the server's file listing
+
+function segmentOf(streamIndex) {
+  const segs = cloud.segments;
+  let lo = 0, hi = segs.length - 1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    const s = segs[mid];
+    if (streamIndex < s.start) hi = mid - 1;
+    else if (streamIndex >= s.start + s.count) lo = mid + 1;
+    else return s;
+  }
+  return null;
+}
 let loading = null;      // AbortController while streaming
 
 function makeMarker() {
@@ -480,11 +497,16 @@ async function pickAt(cx, cy) {
   marker.position.set(pos[3 * id], pos[3 * id + 1], pos[3 * id + 2]);
   marker.visible = true;
   showPoint({ loadingIndex: id });
+  const seg = segmentOf(id);
+  if (!seg) { showPoint(null); return; }
   try {
-    const r = await fetch(`/api/point?file=${cloud.fileId}&i=${id}`);
+    const r = await fetch(`/api/point?file=${seg.file}&i=${seg.local + (id - seg.start)}`);
     const rec = await r.json();
     if (rec.error) throw new Error(rec.error);
+    rec.file_id = seg.file;
+    rec.file_name = (files[seg.file] || {}).name || String(seg.file);
     showPoint(rec);
+    if (String(ui.metaFile.value) !== String(seg.file)) { ui.metaFile.value = String(seg.file); showMetadata(seg.file); }
   } catch (err) {
     $("tab-point").innerHTML = `<em>could not fetch the point: ${esc(err.message)}</em>`;
   }
@@ -517,6 +539,7 @@ function showPoint(rec) {
   const flags = ["synthetic", "key_point", "withheld", "overlap", "edge_of_flight_line"].map((f) => `<span class="${rec[f] ? "flag-on" : ""}">${f}${rec[f] ? " = 1" : " = 0"}</span>`).join(", ");
   add("flags", flags);
   add("scan direction", rec.scan_direction_flag ? "positive (1)" : "negative (0)");
+  add("file", esc(rec.file_name));
   add("index in file", fmtInt(rec.file_index));
   add("index in stream", fmtInt(rec.stream_index));
   page.innerHTML = `<table class="kv">${rows.join("")}</table>
@@ -634,14 +657,31 @@ async function fetchJson(url, signal) {
   return j;
 }
 
-async function loadFiles() {
-  const files = await fetchJson("/api/files");
-  ui.fileSelect.innerHTML = files.map((f) => `<option value="${f.id}">${esc(f.name)} (${fmtInt(f.point_count)} pts, LAS ${esc(f.version)} pf${f.point_format})</option>`).join("");
-  const wanted = new URLSearchParams(location.search).get("file");
-  if (wanted !== null && files.some((f) => String(f.id) === wanted)) ui.fileSelect.value = wanted;
-  await showMetadata(Number(ui.fileSelect.value));
+function selectedIds() {
+  return [...ui.fileList.querySelectorAll("input:checked")].map((cb) => Number(cb.dataset.file));
 }
-ui.fileSelect.addEventListener("change", () => showMetadata(Number(ui.fileSelect.value)));
+function updateFilesCount() {
+  const ids = selectedIds();
+  const pts = ids.reduce((n, i) => n + Math.max(0, files[i].point_count), 0);
+  ui.filesCount.textContent = `${ids.length} of ${files.length}, ${fmtInt(pts)} pts`;
+}
+async function loadFiles() {
+  files = await fetchJson("/api/files");
+  const params = new URLSearchParams(location.search);
+  const wanted = (params.get("files") || params.get("file") || "").split(",").filter((s) => s !== "").map(Number);
+  const checked = (f) => (wanted.length ? wanted.includes(f.id) : true);
+  ui.fileList.innerHTML = files.map((f) => `<label title="${esc(f.path)}"><input type="checkbox" data-file="${f.id}" ${checked(f) ? "checked" : ""}>
+    <span class="nm">${esc(f.name)}</span><span class="ct">${fmtInt(f.point_count)} pf${f.point_format}</span></label>`).join("");
+  ui.fileList.querySelectorAll("input").forEach((cb) => cb.addEventListener("change", updateFilesCount));
+  ui.metaFile.innerHTML = files.map((f) => `<option value="${f.id}">${esc(f.name)}</option>`).join("");
+  updateFilesCount();
+  const first = selectedIds()[0] ?? 0;
+  ui.metaFile.value = String(first);
+  await showMetadata(first);
+}
+$("files-all").addEventListener("click", () => { ui.fileList.querySelectorAll("input").forEach((cb) => (cb.checked = true)); updateFilesCount(); });
+$("files-none").addEventListener("click", () => { ui.fileList.querySelectorAll("input").forEach((cb) => (cb.checked = false)); updateFilesCount(); });
+ui.metaFile.addEventListener("change", () => showMetadata(Number(ui.metaFile.value)));
 
 async function showMetadata(fileId) {
   try {
@@ -649,37 +689,39 @@ async function showMetadata(fileId) {
     renderHeader(meta, fileId);
     renderVlrs(meta);
     renderCrs(meta);
-    if (cloud.fileId !== fileId) {
-      $("tab-stats").innerHTML = "<em>load the file to compute its statistics</em>";
-    }
-    setStatus(`${fmtInt(meta.header.point_count)} points, ${(meta.file.size_bytes / 1048576).toFixed(1)} MB; press Load`);
+    if (!cloud.stats) setStatus(`${fmtInt(meta.header.point_count)} points, ${(meta.file.size_bytes / 1048576).toFixed(1)} MB; tick files and press Load`);
   } catch (err) {
     setStatus(`metadata failed: ${err.message}`);
   }
 }
 
-ui.loadBtn.addEventListener("click", () => startLoad(Number(ui.fileSelect.value)));
+ui.loadBtn.addEventListener("click", () => {
+  const ids = selectedIds();
+  if (!ids.length) { setStatus("tick at least one file"); return; }
+  startLoad(ids);
+});
 ui.stopBtn.addEventListener("click", () => loading && loading.abort());
 
 function disposeCloud() {
   if (points) { scene.remove(points); geometry.dispose(); points = null; geometry = null; }
   if (boundsHelper) { scene.remove(boundsHelper); boundsHelper = null; }
   marker.visible = false;
-  cloud.arrays = null; cloud.loaded = 0; cloud.count = 0; cloud.stats = null;
+  cloud.arrays = null; cloud.loaded = 0; cloud.count = 0; cloud.stats = null; cloud.segments = [];
 }
 
-async function startLoad(fileId) {
+async function startLoad(ids) {
+  const filesParam = ids.join(",");
   if (loading) loading.abort();
   const ctl = new AbortController();
   loading = ctl;
   ui.loadBtn.disabled = true; ui.stopBtn.disabled = false;
   setProgress(0);
   try {
-    setStatus("decoding the file on the server (LAZ takes a while)...");
-    const info = await fetchJson(`/api/load?file=${fileId}`, ctl.signal);
+    setStatus(`decoding ${ids.length} file${ids.length === 1 ? "" : "s"} on the server (LAZ takes a while)...`);
+    const info = await fetchJson(`/api/load?files=${filesParam}`, ctl.signal);
     if (ctl.signal.aborted) return;
     disposeCloud();
-    cloud.fileId = fileId;
+    cloud.fileIds = ids;
     cloud.count = info.point_count;
     cloud.center = info.center;
     cloud.stats = info.stats;
@@ -693,7 +735,7 @@ async function startLoad(fileId) {
     const chunk = 500000;
     for (let start = 0; start < cloud.budget; start += chunk) {
       const n = Math.min(chunk, cloud.budget - start);
-      const r = await fetch(`/api/points?file=${fileId}&start=${start}&count=${n}`, { signal: ctl.signal });
+      const r = await fetch(`/api/points?files=${filesParam}&start=${start}&count=${n}`, { signal: ctl.signal });
       if (!r.ok) throw new Error(`chunk ${start}: HTTP ${r.status}`);
       const buf = await r.arrayBuffer();
       if (ctl.signal.aborted) return;
@@ -701,7 +743,7 @@ async function startLoad(fileId) {
       setProgress(cloud.loaded / cloud.budget);
       setStatus(`${fmtInt(cloud.loaded)} of ${fmtInt(cloud.budget)} points loaded`);
     }
-    setStatus(`${fmtInt(cloud.loaded)} points loaded${cloud.loaded < cloud.count ? ` (a uniform sample of ${fmtInt(cloud.count)})` : ""}`);
+    setStatus(`${fmtInt(cloud.loaded)} points loaded from ${ids.length} file${ids.length === 1 ? "" : "s"}${cloud.loaded < cloud.count ? ` (a uniform sample of ${fmtInt(cloud.count)})` : ""}`);
   } catch (err) {
     if (err.name === "AbortError") setStatus(`stopped at ${fmtInt(cloud.loaded)} points`);
     else { setStatus(`load failed: ${err.message}`); console.error(err); }
@@ -760,10 +802,19 @@ function allocate(n, stats) {
 function ingest(buf, start) {
   const dv = new DataView(buf);
   const magic = String.fromCharCode(dv.getUint8(0), dv.getUint8(1), dv.getUint8(2), dv.getUint8(3));
-  if (magic !== "LPC1") throw new Error("bad chunk");
+  if (magic !== "LPC2") throw new Error("bad chunk");
   const n = dv.getUint32(4, true);
   const hasRgb = dv.getUint8(8) === 1;
+  const nseg = dv.getUint16(10, true);
   let off = 12;
+  let at = start;
+  for (let k = 0; k < nseg; k++) {
+    const seg = { file: dv.getUint32(off, true), local: dv.getUint32(off + 4, true), count: dv.getUint32(off + 8, true), start: at };
+    off += 12;
+    at += seg.count;
+    if (seg.count) cloud.segments.push(seg);
+  }
+  if (at - start !== n) throw new Error("chunk segments do not add up");
   const a = cloud.arrays;
   // A typed view where the offset is aligned for the element size, else an aligned copy
   // (the last chunk's odd count can leave the 2- and 4-byte arrays misaligned).
@@ -892,8 +943,9 @@ function histSvg(hist, label, fmtEdge = (v) => fmt(v, 0)) {
 function renderStats(s) {
   const html = [];
   const ranged = (r, digits = 2) => kvTable([["min / max", `${fmt(r.min, digits)} / ${fmt(r.max, digits)}`], ["mean / std", `${fmt(r.mean, digits)} / ${fmt(r.std, digits)}`],
-    ["percentiles", Object.entries(r.percentiles).map(([p, v]) => `p${p} ${fmt(v, digits)}`).join(", ")]]);
-  html.push("<h4>Points</h4>", kvTable([["count", fmtInt(s.point_count)], ["density", s.density_per_m2 ? `${fmt(s.density_per_m2, 2)} pts/m2` : "-"],
+    ["percentiles", Object.entries(r.percentiles || {}).map(([p, v]) => `p${p} ${fmt(v, digits)}`).join(", ") + (r.percentiles_note ? ` <span class="d">(${esc(r.percentiles_note)})</span>` : "")]]);
+  if (s.files) html.push("<h4>Files</h4>", `<table class="grid"><tr><th>file</th><th>points</th></tr>${s.files.map((f) => `<tr><td class="nm">${esc(f.name)}</td><td>${fmtInt(f.count)}</td></tr>`).join("")}</table>`);
+  html.push("<h4>Points</h4>", kvTable([["count", fmtInt(s.point_count)], ["density", s.density_per_m2 ? `${fmt(s.density_per_m2, 2)} pts/m2${s.density_note ? ` (${esc(s.density_note)})` : ""}` : "-"],
     ["ground points", `${fmtInt(s.ground_points)} (${s.ground_density_per_m2 ? fmt(s.ground_density_per_m2, 2) : "-"} pts/m2)`],
     ["bounds min", s.bounds.min.map((v) => fmt(v, 2)).join(", ")], ["bounds max", s.bounds.max.map((v) => fmt(v, 2)).join(", ")]]));
   html.push("<h4>Classification</h4>", `<table class="grid"><tr><th>code</th><th>name</th><th>count</th><th>%</th></tr>${s.classification.map((r) => `<tr><td><span class="sw" style="background:rgb(${r.color.join(",")})"></span>${r.value}</td><td class="nm">${esc(r.name)}</td><td>${fmtInt(r.count)}</td><td>${(100 * r.fraction).toFixed(2)}</td></tr>`).join("")}</table>`);
