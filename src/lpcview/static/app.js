@@ -306,7 +306,11 @@ function extent() {
   const s = cloud.stats;
   if (!s) return { min: [-500, -500, -50], max: [500, 500, 50] };
   const c = cloud.center;
-  return { min: s.bounds.min.map((v, i) => v - c[i]), max: s.bounds.max.map((v, i) => v - c[i]) };
+  const min = s.bounds.min.map((v, i) => v - c[i]), max = s.bounds.max.map((v, i) => v - c[i]);
+  // Stray noise points can put the z bounds kilometres out; frame the 1-99 percentile band.
+  min[2] = s.z.percentiles["1"] - c[2];
+  max[2] = s.z.percentiles["99"] - c[2];
+  return { min, max };
 }
 function fitView() {
   const e = extent();
@@ -745,8 +749,12 @@ function allocate(n, stats) {
   boundsHelper = new THREE.Box3Helper(box, 0x3a4560);
   boundsHelper.visible = ui.bounds.checked;
   scene.add(boundsHelper);
-  ui.mode.querySelector('option[value="8"]').disabled = !stats.rgb;
-  if (!stats.rgb && ui.mode.value === "8") { ui.mode.value = "0"; uniforms.uMode.value = 0; }
+  // RGB fields that are present but all zero were never filled: grey the mode out.
+  const hasColour = !!stats.rgb && ["red", "green", "blue"].some((k) => stats.rgb[k].max > 0);
+  const rgbOption = ui.mode.querySelector('option[value="8"]');
+  rgbOption.disabled = !hasColour;
+  rgbOption.textContent = !stats.rgb ? "RGB (none in file)" : hasColour ? "RGB" : "RGB (fields all zero)";
+  if (!hasColour && ui.mode.value === "8") { ui.mode.value = "0"; uniforms.uMode.value = 0; }
 }
 
 function ingest(buf, start) {
