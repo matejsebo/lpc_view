@@ -31,4 +31,4 @@ jobs:
 
       - name: Test (page)
         if: ${{ hashFiles('tests/js/**') != '' }}
-        run: node --test tests/js
+        run: npm test
