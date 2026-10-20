@@ -71,13 +71,21 @@ export function createPicker({ THREE, renderer, scene, camera, canvas, cloud, sh
     renderer.setClearColor(0xffffff, 1);
     renderer.clear();
     renderer.render(scene, camera);
-    renderer.readRenderTargetPixels(pickTarget, 0, 0, 1, 1, pickBuffer);
+    // The async read issues its readPixels into a buffer object at once and then
+    // waits for the GPU without stalling the page; the scene's state is put back
+    // before the wait, so the frames drawn meanwhile are ordinary ones. Without
+    // it (WebGL 1, old three), the synchronous read.
+    const read = renderer.readRenderTargetPixelsAsync
+      ? renderer.readRenderTargetPixelsAsync(pickTarget, 0, 0, 1, 1, pickBuffer)
+      : (renderer.readRenderTargetPixels(pickTarget, 0, 0, 1, 1, pickBuffer), null);
     renderer.setRenderTarget(null);
     renderer.setClearColor(0x0b0e14, 1);
     scene.overrideMaterial = null;
     camera.clearViewOffset();
     marker.visible = markerVisible;
     if (boundsHelper) boundsHelper.visible = ui.bounds.checked;
+    if (read) await read;
+    if (cloud.grid !== grid) return;   // a new load began while the read was in flight
     const hit = decodePick(codeOf(pickBuffer), grid.localSpan);
     if (!hit) { panels.showPoint(null); return; }
     const cell = grid.cells[hit.cellId], local = hit.local;
