@@ -85,3 +85,16 @@ def test_merged_stats(pair):
     assert s["flags"]["withheld"] == sum(c.stats()["flags"]["withheld"] for c in pair.clouds)
     assert s["gps_time"]["type"] == "standard" and s["gps_time"]["min_utc"].startswith("2022-04-18")
     assert 100.0 <= s["z"]["percentiles"]["50"] <= 130.0
+
+
+def test_chunk_counts_add_up_to_the_prefix(pair):
+    # The viewer appends chunks by their actual counts: the stream below nominal
+    # position p holds sum(floor(p * n_k / N)) points, at most p, and the chunks of
+    # [0, p) hold exactly that many, so a budget of p points never overflows and the
+    # stream of the whole set holds every point.
+    for p in (1, 7, 100, 777, pair.count):
+        want = sum(p * c.count // pair.count for c in pair.clouds)
+        assert want <= p
+        got = sum(n for start in range(0, p, 64) for _, _, n in pair.segments(start, min(64, p - start)))
+        assert got == want
+    assert sum(n for _, _, n in pair.segments(0, pair.count)) == pair.count
