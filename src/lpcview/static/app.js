@@ -1,6 +1,7 @@
-// lpcview: the browser side. Streams a point cloud from the local server into one
-// preallocated geometry, draws it with a colour-mode shader, flies a camera through
-// it, picks points on the GPU and shows the file's metadata.
+// lpcview: the browser side. Streams a point cloud from the local server into a
+// grid of cells, draws them with a colour-mode shader at a level of detail set by
+// distance and frame time, flies a camera through them, picks points on the GPU
+// and shows the file's metadata.
 
 import * as THREE from "three";
 
@@ -100,7 +101,11 @@ in float pointSource;
 in float scanAngle;
 in float gpsTime;
 in float flags;
+#ifdef HAS_RGB
 in vec3 rgb;
+#else
+const vec3 rgb = vec3(0.78);
+#endif
 uniform int uMode;
 uniform float uSize;
 uniform float uAdaptive;
@@ -116,6 +121,8 @@ uniform float uHideSynthetic;
 uniform sampler2D uClassTex;
 uniform float uPickSize;
 uniform float uMaxSize;
+uniform int uCellId;
+uniform int uLocalBits;
 
 bool hiddenPoint() {
   vec4 cls = texture(uClassTex, vec2((classification + 0.5) / 256.0, 0.5));
@@ -193,8 +200,9 @@ void main() {
   vec4 mv = modelViewMatrix * vec4(position, 1.0);
   gl_Position = projectionMatrix * mv;
   gl_PointSize = max(pointSizeFor(mv, uSize), uPickSize);
-  float id = float(gl_VertexID);
-  vPick = vec4(mod(id, 256.0), mod(floor(id / 256.0), 256.0), mod(floor(id / 65536.0), 256.0), floor(id / 16777216.0)) / 255.0;
+  // The pick colour is the cell id in the high bits and the index in the cell below.
+  uint id = (uint(uCellId) << uint(uLocalBits)) | uint(gl_VertexID);
+  vPick = vec4(float(id & 255u), float((id >> 8u) & 255u), float((id >> 16u) & 255u), float(id >> 24u)) / 255.0;
 }
 `;
 
@@ -237,6 +245,8 @@ const uniforms = {
   uClassTex: { value: classTex },
   uPickSize: { value: 7 },
   uMaxSize: { value: 8 },
+  uCellId: { value: 0 },
+  uLocalBits: { value: 32 },
 };
 
 const material = new THREE.ShaderMaterial({
@@ -248,13 +258,13 @@ const pickMaterial = new THREE.ShaderMaterial({
 const pickTarget = new THREE.WebGLRenderTarget(1, 1, { minFilter: THREE.NearestFilter, magFilter: THREE.NearestFilter });
 const pickBuffer = new Uint8Array(4);
 
-let points = null;       // THREE.Points
-let geometry = null;     // its BufferGeometry
+let cellGroup = null;    // THREE.Group of one THREE.Points per grid cell
 let boundsHelper = null;
 let marker = null;
-const cloud = {          // the loaded cloud's arrays and bookkeeping
+const cloud = {          // the loaded cloud's bookkeeping
   fileIds: [], stats: null, center: [0, 0, 0], count: 0, budget: 0, loaded: 0,
-  hasRgb: false, hasTime: false, arrays: null,
+  hasRgb: false, hasTime: false,
+  grid: null,            // the cells (see makeGrid)
   segments: [],          // {start, file, local, count}: which file each stream index came from
 };
 let files = [];          // the server's file listing
@@ -352,17 +362,18 @@ function topView() {
 }
 function eyeLevel() {
   // Stand 1.8 m above the highest ground point within 3 m; failing ground, any point.
-  if (!cloud.arrays) return;
-  const { pos, cls } = cloud.arrays;
-  const n = cloud.loaded;
+  if (!cloud.grid) return;
   let best = -Infinity, bestAny = -Infinity;
-  const r2 = 9;
-  for (let i = 0; i < n; i++) {
-    const dx = pos[3 * i] - cam.pos.x, dy = pos[3 * i + 1] - cam.pos.y;
-    if (dx * dx + dy * dy > r2) continue;
-    const z = pos[3 * i + 2];
-    if (z > bestAny) bestAny = z;
-    if (cls[i] === 2 && z > best) best = z;
+  const r = 3, r2 = r * r;
+  for (const cell of cellsAround(cam.pos.x, cam.pos.y, r)) {
+    const { pos, cls } = cell.arrays;
+    for (let i = 0; i < cell.n; i++) {
+      const dx = pos[3 * i] - cam.pos.x, dy = pos[3 * i + 1] - cam.pos.y;
+      if (dx * dx + dy * dy > r2) continue;
+      const z = pos[3 * i + 2];
+      if (z > bestAny) bestAny = z;
+      if (cls[i] === 2 && z > best) best = z;
+    }
   }
   const ground = best > -Infinity ? best : bestAny;
   if (ground === -Infinity) { setStatus("no points within 3 m of the camera"); return; }
@@ -447,14 +458,26 @@ function stepCamera(dt) {
 // Render loop
 // ---------------------------------------------------------------------------
 
-// Level of detail: the fraction of the loaded points drawn. The stream is a uniform
-// shuffle, so the first k points are a uniform sample of the loaded ones. While the
-// camera moves, every frame over the target cuts the fraction and every frame well
-// under it raises it a little; once the camera has been still for a moment the
-// fraction climbs back to all the points, a quarter more each frame.
+// Level of detail. The points sit in a grid of cells (makeGrid), each filled in
+// arrival order, so the first k points of a cell are a uniform sample of it. Each
+// frame culls the cells outside the frustum and gives every visible cell a draw
+// range from its distance d to the camera: all its points within `near` metres,
+// a fraction (near / d)^2 beyond, which keeps the points per screen area about
+// constant. `near` is the knob a frame-time controller turns: while the camera
+// moves, a frame over the 16 ms target (with a fifth of slack for vsync jitter)
+// pulls it in, by the ratio of the times but never below 0.7 on the drawn count,
+// and a frame at or under it pushes it out, 4 % more points (15 % when the frame
+// took under half the target), so on a display whose refresh pins every frame to
+// the same interval the detail still climbs until a frame is skipped; once the
+// camera has been still for a moment it grows a fifth each frame until every
+// cell draws everything. A move starts where the last one settled, not at the
+// still camera's all.
 const TARGET_MS = 16;
-const lod = { fraction: 1, movingFraction: 1, moving: false, stillSince: 0, drawn: 0 };
+const NEAR_ALL = 1e6;                      // metres: farther than any cell, i.e. all
+const lod = { near: 200, movingNear: 200, moving: false, stillSince: 0, drawn: 0, cellsDrawn: 0 };
 const prevPose = { x: NaN, y: NaN, z: NaN, yaw: NaN, pitch: NaN };
+const frustum = new THREE.Frustum();
+const projView = new THREE.Matrix4();
 
 function cameraMoved() {
   const p = cam.pos;
@@ -468,21 +491,40 @@ function updateLod(now, frameMs) {
   const wasMoving = lod.moving;
   lod.moving = now - lod.stillSince < 150;
   if (lod.moving) {
-    // Start a move at the fraction the last move settled at, not at the still camera's all.
-    if (!wasMoving) lod.fraction = Math.min(lod.fraction, lod.movingFraction);
-    if (frameMs > TARGET_MS * 1.2) lod.fraction *= Math.max(0.5, (0.9 * TARGET_MS) / frameMs);
-    else if (frameMs < TARGET_MS * 0.7) lod.fraction *= 1.05;
-    lod.fraction = Math.min(1, Math.max(0.005, lod.fraction));
-    lod.movingFraction = lod.fraction;
-  } else if (lod.fraction < 1) {
-    lod.fraction = Math.min(1, lod.fraction * 1.25);
+    if (!wasMoving) lod.near = Math.min(lod.near, lod.movingNear);
+    // The drawn count goes with near^2, so a factor on the count is its square root on near.
+    let factor = 1.04;
+    if (frameMs > TARGET_MS * 1.2) factor = Math.max(0.7, (0.9 * TARGET_MS) / frameMs);
+    else if (frameMs < TARGET_MS * 0.5) factor = 1.15;
+    lod.near = Math.min(NEAR_ALL, Math.max(5, lod.near * Math.sqrt(factor)));
+    lod.movingNear = lod.near;
+  } else if (lod.near < NEAR_ALL) {
+    lod.near = Math.min(NEAR_ALL, lod.near * 1.2);
   }
 }
 
+// Cull and set every cell's draw range for the current camera.
 function applyLod() {
-  if (!geometry) { lod.drawn = 0; return; }
-  lod.drawn = lod.fraction >= 1 ? cloud.loaded : Math.floor(cloud.loaded * lod.fraction);
-  geometry.setDrawRange(0, lod.drawn);
+  lod.drawn = 0; lod.cellsDrawn = 0;
+  const grid = cloud.grid;
+  if (!grid) return;
+  camera.updateMatrixWorld();
+  projView.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
+  frustum.setFromProjectionMatrix(projView);
+  const near2 = lod.near * lod.near;
+  for (const cell of grid.cells) {
+    if (!cell.n) continue;
+    cell.box.min.z = cell.zmin; cell.box.max.z = cell.zmax;
+    const visible = frustum.intersectsBox(cell.box);
+    cell.points.visible = visible;
+    if (!visible) { cell.drawn = 0; continue; }
+    const d = cell.box.distanceToPoint(camera.position);
+    const f = d <= lod.near ? 1 : near2 / (d * d);
+    cell.drawn = f >= 1 ? cell.n : Math.floor(cell.n * f);
+    cell.geometry.setDrawRange(0, cell.drawn);
+    lod.drawn += cell.drawn;
+    lod.cellsDrawn++;
+  }
 }
 
 let lastT = performance.now(), frames = 0, fpsT = lastT;
@@ -510,7 +552,8 @@ function updateHud() {
   ui.hudLook.textContent = `hdg ${fmt((hd + 360) % 360, 0)}  pitch ${fmt((cam.pitch * 180) / Math.PI, 0)}  ${cam.speed.toFixed(cam.speed >= 10 ? 0 : 1)} m/s`;
   ui.hudPts.textContent = cloud.count ? `${fmtInt(cloud.loaded)} / ${fmtInt(cloud.count)} pts` : "-";
   const f = cloud.loaded ? lod.drawn / cloud.loaded : 0;
-  ui.hudDraw.textContent = !cloud.loaded ? "-" : lod.drawn >= cloud.loaded ? "all drawn" : `${fmtInt(lod.drawn)} drawn (${(100 * f).toFixed(f < 0.1 ? 1 : 0)}%)`;
+  const full = lod.near >= NEAR_ALL ? "full everywhere" : `full to ${lod.near < 100 ? lod.near.toFixed(0) : (Math.round(lod.near / 10) * 10).toFixed(0)} m`;
+  ui.hudDraw.textContent = !cloud.loaded ? "-" : `${fmtInt(lod.drawn)} drawn (${(100 * f).toFixed(f < 0.1 ? 1 : 0)}%) in ${lod.cellsDrawn} cells, ${full}`;
 }
 requestAnimationFrame(frame);
 
@@ -519,17 +562,19 @@ requestAnimationFrame(frame);
 // ---------------------------------------------------------------------------
 
 async function pickAt(cx, cy) {
-  if (!points || cloud.loaded === 0) return;
+  const grid = cloud.grid;
+  if (!grid || cloud.loaded === 0) return;
   const rect = canvas.getBoundingClientRect();
   const x = (cx - rect.left) * renderer.getPixelRatio();
   const y = (cy - rect.top) * renderer.getPixelRatio();
   const size = renderer.getSize(new THREE.Vector2()).multiplyScalar(renderer.getPixelRatio());
   camera.setViewOffset(size.x, size.y, Math.floor(x), Math.floor(y), 1, 1);
-  const keepMat = points.material;
-  points.material = pickMaterial;
   const markerVisible = marker.visible;
   marker.visible = false;
   if (boundsHelper) boundsHelper.visible = false;
+  // The pick render draws the cells with the draw ranges of the last frame; each
+  // cell's onBeforeRender sets uCellId, so the colour read back is (cell, index).
+  scene.overrideMaterial = pickMaterial;
   renderer.setRenderTarget(pickTarget);
   renderer.setClearColor(0xffffff, 1);
   renderer.clear();
@@ -537,15 +582,19 @@ async function pickAt(cx, cy) {
   renderer.readRenderTargetPixels(pickTarget, 0, 0, 1, 1, pickBuffer);
   renderer.setRenderTarget(null);
   renderer.setClearColor(0x0b0e14, 1);
+  scene.overrideMaterial = null;
   camera.clearViewOffset();
-  points.material = keepMat;
   marker.visible = markerVisible;
   if (boundsHelper) boundsHelper.visible = ui.bounds.checked;
-  const id = pickBuffer[0] + pickBuffer[1] * 256 + pickBuffer[2] * 65536 + pickBuffer[3] * 16777216;
-  if (id === 0xffffffff || id >= cloud.loaded) { showPoint(null); return; }
-  const { pos } = cloud.arrays;
-  marker.position.set(pos[3 * id], pos[3 * id + 1], pos[3 * id + 2]);
+  const code = pickBuffer[0] + pickBuffer[1] * 256 + pickBuffer[2] * 65536 + pickBuffer[3] * 16777216;
+  if (code === 0xffffffff) { showPoint(null); return; }
+  const cellId = Math.floor(code / grid.localSpan), local = code - cellId * grid.localSpan;
+  const cell = grid.cells[cellId];
+  if (!cell || !cell.n || local >= cell.n) { showPoint(null); return; }
+  const { pos } = cell.arrays;
+  marker.position.set(pos[3 * local], pos[3 * local + 1], pos[3 * local + 2]);
   marker.visible = true;
+  const id = cell.arrays.stream[local];
   showPoint({ loadingIndex: id });
   const seg = segmentOf(id);
   if (!seg) { showPoint(null); return; }
@@ -782,10 +831,13 @@ ui.loadBtn.addEventListener("click", () => {
 ui.stopBtn.addEventListener("click", () => loading && loading.abort());
 
 function disposeCloud() {
-  if (points) { scene.remove(points); geometry.dispose(); points = null; geometry = null; }
+  if (cellGroup) {
+    for (const cell of cloud.grid.cells) if (cell.geometry) cell.geometry.dispose();
+    scene.remove(cellGroup); cellGroup = null;
+  }
   if (boundsHelper) { scene.remove(boundsHelper); boundsHelper = null; }
   marker.visible = false;
-  cloud.arrays = null; cloud.loaded = 0; cloud.count = 0; cloud.stats = null; cloud.segments = [];
+  cloud.grid = null; cloud.loaded = 0; cloud.count = 0; cloud.stats = null; cloud.segments = [];
 }
 
 async function startLoad(ids) {
@@ -832,40 +884,108 @@ async function startLoad(ids) {
   }
 }
 
-function allocate(n, stats) {
-  const a = {
-    pos: new Float32Array(3 * n),
-    intensity: new Uint16Array(n),
-    cls: new Uint8Array(n),
-    ret: new Uint8Array(n),
-    nret: new Uint8Array(n),
-    psid: new Uint16Array(n),
-    angle: new Float32Array(n),
-    time: new Float32Array(n),
-    flags: new Uint8Array(n),
-    rgb: stats.rgb ? new Uint8Array(3 * n) : new Uint8Array(3),
-  };
-  cloud.arrays = a;
-  cloud.hasRgb = !!stats.rgb;
-  geometry = new THREE.BufferGeometry();
-  geometry.setAttribute("position", new THREE.BufferAttribute(a.pos, 3));
-  geometry.setAttribute("intensity", new THREE.BufferAttribute(a.intensity, 1, true));
-  geometry.setAttribute("classification", new THREE.BufferAttribute(a.cls, 1));
-  geometry.setAttribute("returnNumber", new THREE.BufferAttribute(a.ret, 1));
-  geometry.setAttribute("numReturns", new THREE.BufferAttribute(a.nret, 1));
-  geometry.setAttribute("pointSource", new THREE.BufferAttribute(a.psid, 1));
-  geometry.setAttribute("scanAngle", new THREE.BufferAttribute(a.angle, 1));
-  geometry.setAttribute("gpsTime", new THREE.BufferAttribute(a.time, 1));
-  geometry.setAttribute("flags", new THREE.BufferAttribute(a.flags, 1));
-  // Without RGB in the file, one grey for every vertex keeps the shader uniform.
-  geometry.setAttribute("rgb", new THREE.BufferAttribute(stats.rgb ? a.rgb : new Uint8Array(3 * n).fill(200), 3, true));
-  for (const name of Object.keys(geometry.attributes)) geometry.getAttribute(name).setUsage(THREE.DynamicDrawUsage);
-  geometry.setDrawRange(0, 0);
+// The grid: the loaded extent cut into cells about CELL_M square (at most MAX_CELLS
+// of them, larger when the extent is huge), each with its own buffers filled in
+// arrival order. The stream is a uniform shuffle, so each cell's points are too,
+// and a cell's draw range is a uniform sample of it. Picks come back as
+// (cell id, index in cell): cell ids take the high bits of the 32-bit pick colour
+// and indices the rest, and `stream` maps an index back to its stream position.
+const CELL_M = 100;
+const MAX_CELLS = 4096;
+const ATTRS = [["position", "pos", 3], ["intensity", "intensity", 1], ["classification", "cls", 1], ["returnNumber", "ret", 1], ["numReturns", "nret", 1], ["pointSource", "psid", 1], ["scanAngle", "angle", 1], ["gpsTime", "time", 1], ["flags", "flags", 1], ["rgb", "rgb", 3]];
+
+function makeGrid(budget, stats) {
   const e = extent();
-  geometry.boundingSphere = new THREE.Sphere(new THREE.Vector3(0, 0, 0), Math.hypot(e.max[0] - e.min[0], e.max[1] - e.min[1], e.max[2] - e.min[2]));
-  points = new THREE.Points(geometry, material);
-  points.frustumCulled = false;
-  scene.add(points);
+  const ex = Math.max(e.max[0] - e.min[0], 1), ey = Math.max(e.max[1] - e.min[1], 1);
+  let cellM = CELL_M;
+  if ((ex / cellM) * (ey / cellM) > MAX_CELLS) cellM = Math.sqrt((ex * ey) / MAX_CELLS);
+  const nx = Math.max(1, Math.round(ex / cellM)), ny = Math.max(1, Math.round(ey / cellM));
+  const cellBits = Math.max(1, Math.ceil(Math.log2(nx * ny + 1)));
+  const grid = {
+    nx, ny, x0: e.min[0], y0: e.min[1], dx: ex / nx, dy: ey / ny, cells: [],
+    localBits: 32 - cellBits, localSpan: 2 ** (32 - cellBits),
+    hasRgb: !!stats.rgb,
+  };
+  for (let iy = 0; iy < ny; iy++) {
+    for (let ix = 0; ix < nx; ix++) {
+      const x = grid.x0 + ix * grid.dx, y = grid.y0 + iy * grid.dy;
+      grid.cells.push({
+        id: grid.cells.length, ix, iy, n: 0, cap: 0, expected: 0, drawn: 0, zmin: Infinity, zmax: -Infinity,
+        box: new THREE.Box3(new THREE.Vector3(x, y, 0), new THREE.Vector3(x + grid.dx, y + grid.dy, 0)),
+        arrays: null, geometry: null, points: null,
+      });
+    }
+  }
+  uniforms.uLocalBits.value = grid.localBits;
+  return grid;
+}
+
+function cellIndex(grid, x, y) {
+  const ix = Math.min(grid.nx - 1, Math.max(0, Math.floor((x - grid.x0) / grid.dx)));
+  const iy = Math.min(grid.ny - 1, Math.max(0, Math.floor((y - grid.y0) / grid.dy)));
+  return ix + iy * grid.nx;
+}
+
+// The filled cells whose footprint comes within r metres of (x, y).
+function cellsAround(x, y, r) {
+  const g = cloud.grid, out = [];
+  if (!g) return out;
+  const ax = Math.max(0, Math.floor((x - r - g.x0) / g.dx)), bx = Math.min(g.nx - 1, Math.floor((x + r - g.x0) / g.dx));
+  const ay = Math.max(0, Math.floor((y - r - g.y0) / g.dy)), by = Math.min(g.ny - 1, Math.floor((y + r - g.y0) / g.dy));
+  for (let iy = ay; iy <= by; iy++) for (let ix = ax; ix <= bx; ix++) { const c = g.cells[ix + iy * g.nx]; if (c.n) out.push(c); }
+  return out;
+}
+
+function cellArrays(cap, hasRgb) {
+  return {
+    pos: new Float32Array(3 * cap), intensity: new Uint16Array(cap), cls: new Uint8Array(cap), ret: new Uint8Array(cap),
+    nret: new Uint8Array(cap), psid: new Uint16Array(cap), angle: new Float32Array(cap), time: new Float32Array(cap),
+    flags: new Uint8Array(cap), rgb: hasRgb ? new Uint8Array(3 * cap) : null, stream: new Uint32Array(cap),
+  };
+}
+
+// Give a cell room for `needed` points: fresh arrays and a fresh geometry (the old
+// geometry is disposed, which frees its GPU buffers) with the points so far copied.
+// The first chunk is a uniform sample of the whole load, so a cell's share of it
+// says how many points it will get; the first allocation is that and a margin,
+// and a cell that outgrows it gets half as much again each time.
+function growCell(cell, needed) {
+  const grid = cloud.grid;
+  const cap = Math.max(needed, cell.cap ? Math.ceil(cell.cap * 1.5) : Math.ceil(cell.expected * 1.15) + 1024);
+  const a = cellArrays(cap, grid.hasRgb);
+  if (cell.arrays) for (const k of Object.keys(a)) if (a[k]) a[k].set(cell.arrays[k].subarray(0, cell.n * (k === "pos" || k === "rgb" ? 3 : 1)));
+  const g = new THREE.BufferGeometry();
+  for (const [name, key, items] of ATTRS) {
+    if (key === "rgb" && !grid.hasRgb) continue;
+    const attr = new THREE.BufferAttribute(a[key], items, key === "intensity" || key === "rgb");
+    attr.setUsage(THREE.DynamicDrawUsage);
+    g.setAttribute(name, attr);
+  }
+  g.setDrawRange(0, cell.drawn);
+  g.boundingSphere = new THREE.Sphere(new THREE.Vector3(0, 0, 0), 1e9);   // culled here, not by three
+  if (cell.geometry) cell.geometry.dispose();
+  cell.arrays = a; cell.cap = cap; cell.geometry = g;
+  if (cell.points) cell.points.geometry = g;
+  else {
+    const p = new THREE.Points(g, material);
+    p.frustumCulled = false;
+    p.onBeforeRender = (r, s, c, geom, mat) => { if (mat === pickMaterial) { uniforms.uCellId.value = cell.id; mat.uniformsNeedUpdate = true; } };
+    cell.points = p;
+    cellGroup.add(p);
+  }
+  if (cell.n > grid.localSpan) console.warn(`cell ${cell.id} holds ${cell.n} points, more than a pick can address (${grid.localSpan})`);
+}
+
+function allocate(n, stats) {
+  cloud.hasRgb = !!stats.rgb;
+  for (const m of [material, pickMaterial]) {
+    const want = cloud.hasRgb ? { HAS_RGB: 1 } : {};
+    if (JSON.stringify(m.defines || {}) !== JSON.stringify(want)) { m.defines = want; m.needsUpdate = true; }
+  }
+  cellGroup = new THREE.Group();
+  scene.add(cellGroup);
+  cloud.grid = makeGrid(n, stats);
+  const e = extent();
   const box = new THREE.Box3(new THREE.Vector3(...e.min), new THREE.Vector3(...e.max));
   boundsHelper = new THREE.Box3Helper(box, 0x3a4560);
   boundsHelper.visible = ui.bounds.checked;
@@ -878,10 +998,11 @@ function allocate(n, stats) {
   if (!hasColour && ui.mode.value === "8") { ui.mode.value = "0"; uniforms.uMode.value = 0; }
 }
 
-// Append a chunk after the points already loaded. A chunk asked for as stream
-// positions [s, s+count) holds the mosaic's points at those positions, which is
-// count points give or take one per file (each file contributes floor(p * n_k / N)
-// points below position p), so chunks are placed by their actual counts, not by s.
+// Append a chunk after the points already loaded, each point into its cell. A chunk
+// asked for as stream positions [s, s+count) holds the mosaic's points at those
+// positions, which is count points give or take one per file (each file contributes
+// floor(p * n_k / N) points below position p), so chunks are placed by their actual
+// counts, not by s.
 function ingest(buf) {
   const start = cloud.loaded;
   const dv = new DataView(buf);
@@ -899,7 +1020,6 @@ function ingest(buf) {
     if (seg.count) cloud.segments.push(seg);
   }
   if (at - start !== n) throw new Error("chunk segments do not add up");
-  const a = cloud.arrays;
   // A typed view where the offset is aligned for the element size, else an aligned copy
   // (the last chunk's odd count can leave the 2- and 4-byte arrays misaligned).
   const take = (Ctor, count) => {
@@ -917,21 +1037,39 @@ function ingest(buf) {
   const angle = take(Float32Array, n);
   const time = take(Float32Array, n);
   const flags = take(Uint8Array, n);
-  a.pos.set(pos, 3 * start);
-  a.intensity.set(intensity, start);
-  a.cls.set(cls, start);
-  a.ret.set(ret, start);
-  a.nret.set(nret, start);
-  a.psid.set(psid, start);
-  a.angle.set(angle, start);
-  a.time.set(time, start);
-  a.flags.set(flags, start);
-  if (hasRgb && cloud.hasRgb) a.rgb.set(take(Uint8Array, 3 * n), 3 * start);
-  for (const [name, items] of [["position", 3], ["intensity", 1], ["classification", 1], ["returnNumber", 1], ["numReturns", 1], ["pointSource", 1], ["scanAngle", 1], ["gpsTime", 1], ["flags", 1], ["rgb", 3]]) {
-    const attr = geometry.getAttribute(name);
-    if (name === "rgb" && !cloud.hasRgb) continue;
-    attr.addUpdateRange(start * items, n * items);
-    attr.needsUpdate = true;
+  const rgb = hasRgb ? take(Uint8Array, 3 * n) : null;
+  const grid = cloud.grid;
+  // Which cell each point goes to, and how many each cell gets, so a cell grows once.
+  const target = new Uint32Array(n), counts = new Uint32Array(grid.cells.length);
+  for (let i = 0; i < n; i++) { const c = cellIndex(grid, pos[3 * i], pos[3 * i + 1]); target[i] = c; counts[c]++; }
+  const cursor = new Uint32Array(grid.cells.length);
+  for (let c = 0; c < counts.length; c++) {
+    if (!counts[c]) continue;
+    const cell = grid.cells[c];
+    if (start === 0) cell.expected = (counts[c] * cloud.budget) / n;
+    if (cell.n + counts[c] > cell.cap) growCell(cell, cell.n + counts[c]);
+    cursor[c] = cell.n;
+  }
+  for (let i = 0; i < n; i++) {
+    const cell = grid.cells[target[i]], a = cell.arrays, k = cursor[target[i]]++;
+    const z = pos[3 * i + 2];
+    a.pos[3 * k] = pos[3 * i]; a.pos[3 * k + 1] = pos[3 * i + 1]; a.pos[3 * k + 2] = z;
+    a.intensity[k] = intensity[i]; a.cls[k] = cls[i]; a.ret[k] = ret[i]; a.nret[k] = nret[i]; a.psid[k] = psid[i];
+    a.angle[k] = angle[i]; a.time[k] = time[i]; a.flags[k] = flags[i]; a.stream[k] = start + i;
+    if (a.rgb && rgb) { a.rgb[3 * k] = rgb[3 * i]; a.rgb[3 * k + 1] = rgb[3 * i + 1]; a.rgb[3 * k + 2] = rgb[3 * i + 2]; }
+    if (z < cell.zmin) cell.zmin = z;
+    if (z > cell.zmax) cell.zmax = z;
+  }
+  for (let c = 0; c < counts.length; c++) {
+    if (!counts[c]) continue;
+    const cell = grid.cells[c];
+    for (const [name, key, items] of ATTRS) {
+      if (key === "rgb" && !grid.hasRgb) continue;
+      const attr = cell.geometry.getAttribute(name);
+      attr.addUpdateRange(cell.n * items, counts[c] * items);
+      attr.needsUpdate = true;
+    }
+    cell.n += counts[c];
   }
   cloud.loaded = start + n;
 }
@@ -1056,4 +1194,4 @@ function renderStats(s) {
 loadFiles().catch((err) => setStatus(`could not list files: ${err.message}`));
 
 // A handle for debugging from the console.
-window.lpcview = { pickAt, cloud, cam, lod, uniforms, fitView, topView, eyeLevel, startLoad, pickBuffer, get points() { return points; }, renderer, scene, camera };
+window.lpcview = { pickAt, cloud, cam, lod, uniforms, fitView, topView, eyeLevel, startLoad, pickBuffer, get cells() { return cellGroup; }, renderer, scene, camera };

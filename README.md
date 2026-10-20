@@ -50,8 +50,18 @@ uv run lpcview info path/to/tile.laz --stats
   it goes. Several files load as one mosaic, each contributing in proportion to
   its size; the statistics and class list merge, and a picked point reports
   which file it came from. "all" loads every point; 20 M points take roughly
-  500 MB of GPU memory. Decoded files stay in memory (`--max-loaded` caps how
-  many), so a 40 M point mosaic wants a few GB of RAM.
+  700 MB of GPU memory and as much again in the page. Decoded files stay in
+  memory (`--max-loaded` caps how many), so a 40 M point mosaic wants a few GB
+  of RAM.
+- **Level of detail**: the points sit in a grid of cells about 100 m square cut
+  from the loaded extent, each filled in arrival order, so a prefix of a cell is
+  a uniform sample of it. Every frame culls the cells outside the view and draws
+  each visible cell in full within a "full to" distance and at (distance ratio)^2
+  of its points beyond it, which keeps the points per screen area about even.
+  While the camera moves, that distance follows the frame time towards a 16 ms
+  target; once the camera is still it grows until every visible cell draws
+  everything. The HUD shows the points and cells drawn and the distance.
+  "Bigger when near" enlarges points up to 8 px (times the pixel ratio).
 - **Colour by** elevation, intensity, classification, return number, number of
   returns, point source id, GPS time, scan angle, RGB (when the file has it), or
   single/first/last return.
@@ -106,8 +116,9 @@ is needed: Python, laspy, numpy and pyproj are in the exe.
   `__main__.py` runs it for `python -m lpcview` and the exe.
 - `tools/build_exe.py`: the PyInstaller build.
 - `src/lpcview/classes.py`: the ASPRS class table and colours.
-- `src/lpcview/static/`: the page, its style, `app.js` (three.js scene, fly
-  camera, GPU picking, panels) and the vendored three.js r180 (MIT).
+- `src/lpcview/static/`: the page, its style, `app.js` (three.js scene, the
+  grid of cells and their level of detail, fly camera, GPU picking, panels) and
+  the vendored three.js r180 (MIT).
 - `tests/`: pytest, on a synthetic LAS/LAZ written with laspy.
 
 ```bash
@@ -123,3 +134,22 @@ uv run pytest
 - Point coordinates are sent to the browser as float32 offsets from the centre
   of the file's bounding box; the inspector fetches the exact values from the
   server.
+- A pick reads one pixel of a render in which each point's colour is its cell id
+  (high bits) and index in the cell; the cell maps the index to its stream
+  position and the stream's segment table to the file and the file's point.
+- Frame rates, 2026-10-20, on the 16 UCSD tiles (42.3 M points, 2.8 x 3.4 km)
+  in the Claude desktop app's browser pane at 1024 x 768 on an RTX 5080 shared
+  with an Unreal Editor (the pane's frames are not vsynced, so the rates are
+  what the GPU and the page allow):
+  - Before (one buffer, every loaded point drawn every frame): 10 M points at
+    125-144 fps in every view; 42.3 M at 37 fps from the fit view and 58 fps at
+    eye level. Earlier the same day, with 1.7 GB of RAM free beside a 44 GB
+    Unreal Editor, 42.3 M drew at 2-3 fps and 10 M at 48 fps.
+  - After (cells, culling and the level of detail): 10 M points at the 144 fps
+    cap in every view, every visible cell in full; 42.3 M at eye level 122 fps
+    still and flying (the frustum keeps 263 of 914 cells, 13.1 M points, under
+    the target so they draw in full), 134 fps turning; from the fit view all
+    42.3 M drawn at 42 fps when still, 70 fps flying in with the distance cut
+    to 1,775 m (14.0 M points drawn), 123 fps turning away (8 cells).
+  - A click resolves to its file and index in every one of those views; the
+    marker sits on the server's coordinates of the picked point.
