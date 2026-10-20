@@ -145,6 +145,13 @@ def test_meta_load_points_point(server):
     assert status == 200
     meta = json.loads(body)
     assert meta["file"]["compressed"] is True
+    assert Path(meta["file"]["path"]).is_absolute()
+    # The share-safe export: the same JSON with the path cut to the name.
+    safe = json.loads(get(server + "/api/meta?file=1&safe=1")[1])
+    assert safe["file"]["path"] == safe["file"]["name"] == "sample.laz"
+    assert {**safe, "file": {**safe["file"], "path": meta["file"]["path"]}} == meta
+    assert str(Path(meta["file"]["path"]).parent) not in json.dumps(safe)
+    assert json.loads(get(server + "/api/meta?file=1&safe=0")[1]) == meta
     status, body, _ = get(server + "/api/load?file=1")
     info = json.loads(body)
     assert info["point_count"] == N_POINTS and info["files"] == [1]

@@ -4,7 +4,10 @@ Routes:
   GET /                         the viewer page
   GET /static/<file>            its scripts, styles and the vendored three.js
   GET /api/files                the files on offer: id, name, size, point count
-  GET /api/meta?file=<id>       header, VLRs, EVLRs, CRS (no point decoding)
+  GET /api/meta?file=<id>       header, VLRs, EVLRs, CRS (no point decoding);
+                                &safe=1 gives the same JSON with file.path cut to
+                                the file's name, for an export that leaves the
+                                machine (nothing else in it names a local path)
   GET /api/load?files=<id,id,..>
                                 decode those files (once each); returns the merged
                                 statistics, point count and centre. At most
@@ -349,7 +352,10 @@ class Handler(SimpleHTTPRequestHandler):
         if route == "files":
             self._send_json(cat.listing())
         elif route == "meta":
-            self._send_json(cat.meta(self._file_id(q)))
+            meta = cat.meta(self._file_id(q))
+            if (q.get("safe") or ["0"])[0] not in ("", "0", "false"):
+                meta = {**meta, "file": {**meta["file"], "path": meta["file"]["name"]}}
+            self._send_json(meta)
         elif route == "load":
             ids = self._file_ids(q)
             cs = cat.cloud_set(ids)
