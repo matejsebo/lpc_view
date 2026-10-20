@@ -3,6 +3,7 @@
 // (point, stats, header, VLRs, CRS) and the metadata they show.
 
 import { apiUrl, fetchJson } from "./api.js";
+import { classColor, setClassColor } from "./classes.js";
 
 export const $ = (id) => document.getElementById(id);
 export const ui = {
@@ -40,25 +41,6 @@ export const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "
 
 export function setStatus(text) { ui.status.textContent = text; }
 export function setProgress(frac) { ui.progress.style.width = `${Math.round(100 * frac)}%`; }
-
-// ---------------------------------------------------------------------------
-// Class colours (mirrors lpc_view/classes.py for codes the stats have not named)
-// ---------------------------------------------------------------------------
-
-const CLASS_COLORS = {};
-export function classColor(code) {
-  if (CLASS_COLORS[code]) return CLASS_COLORS[code];
-  const h = (code * 137.508) % 360;
-  const col = hsvToRgb(h / 360, 0.6, 0.85);
-  CLASS_COLORS[code] = col;
-  return col;
-}
-function hsvToRgb(h, s, v) {
-  const i = Math.floor(h * 6), f = h * 6 - i;
-  const p = v * (1 - s), q = v * (1 - f * s), t = v * (1 - (1 - f) * s);
-  const [r, g, b] = [[v, t, p], [q, v, p], [p, v, t], [p, q, v], [t, p, v], [v, p, q]][i % 6];
-  return [Math.round(r * 255), Math.round(g * 255), Math.round(b * 255)];
-}
 
 // ---------------------------------------------------------------------------
 // Metadata tables
@@ -199,7 +181,7 @@ export function createPanels({ cloud, cam, marker, shading }) {
 
   function buildClassList(stats) {
     const rows = stats.classification.map((r) => {
-      CLASS_COLORS[r.value] = r.color;
+      setClassColor(r.value, r.color);
       return `<label><input type="checkbox" data-class="${r.value}" ${classVisible[r.value] ? "checked" : ""}>
         <span class="sw" style="background:rgb(${r.color.join(",")})"></span>
         <span class="nm" title="${esc(r.name)}">${r.value} ${esc(r.name)}</span>
