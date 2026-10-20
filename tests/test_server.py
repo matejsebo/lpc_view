@@ -24,6 +24,11 @@ def server(sample_las, sample_laz):
 
 
 def get(url: str, token: str | None = TOKEN, host: str | None = None) -> tuple[int, bytes, str]:
+    status, body, headers = get_with_headers(url, token, host)
+    return status, body, headers.get("Content-Type", "")
+
+
+def get_with_headers(url: str, token: str | None = TOKEN, host: str | None = None):
     headers = {}
     if token:
         headers["X-Lpc-Token"] = token
@@ -32,9 +37,9 @@ def get(url: str, token: str | None = TOKEN, host: str | None = None) -> tuple[i
     req = urllib.request.Request(url, headers=headers)
     try:
         with urllib.request.urlopen(req) as r:
-            return r.status, r.read(), r.headers.get("Content-Type", "")
+            return r.status, r.read(), r.headers
     except urllib.error.HTTPError as e:
-        return e.code, e.read(), e.headers.get("Content-Type", "")
+        return e.code, e.read(), e.headers
 
 
 def test_only_this_machine_and_only_with_the_token(server):
@@ -235,3 +240,11 @@ def test_busy_port_is_a_one_line_message(sample_las, capsys):
         assert main(["serve", str(sample_las), "--port", str(port)]) == 2
     err = capsys.readouterr().err
     assert err.count("\n") == 1 and f"port {port}" in err and "--port" in err
+
+
+def test_every_response_carries_the_safety_headers(server):
+    for path, token in (("/", None), ("/static/app.js", None), ("/api/files", TOKEN), ("/api/files", None),
+                        ("/api/points?file=0&count=10", TOKEN), ("/nothing.html", None), ("/static/", None)):
+        status, _, headers = get_with_headers(server + path, token=token)
+        assert headers["Referrer-Policy"] == "no-referrer", (path, status)
+        assert headers["X-Content-Type-Options"] == "nosniff", (path, status)

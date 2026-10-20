@@ -238,6 +238,11 @@ class Handler(SimpleHTTPRequestHandler):
         given = self.headers.get(TOKEN_HEADER) or (q.get("token") or [""])[0]
         return bool(given) and secrets.compare_digest(given, self.token)
 
+    def end_headers(self) -> None:  # on every response, static files and errors included
+        self.send_header("Referrer-Policy", "no-referrer")  # the token rides in the page's URL
+        self.send_header("X-Content-Type-Options", "nosniff")
+        super().end_headers()
+
     def list_directory(self, path: Any) -> None:  # no directory listings of static/
         self.send_error(HTTPStatus.NOT_FOUND)
         return None
