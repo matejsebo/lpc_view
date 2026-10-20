@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import mimetypes
+import sys
 import threading
 import time
 from functools import partial
@@ -69,6 +70,31 @@ class Catalog:
         self._locks = [threading.Lock() for _ in files]
         self._recent: list[int] = []
         self._transformers: dict[int, Any] = {}
+        self._files_lock = threading.Lock()
+
+    def add_files(self, paths: list[str | Path]) -> list[int]:
+        """Put more files (or directories of them) on offer; returns the ids of the new ones.
+
+        A file already in the catalog keeps its id and is not repeated. Ids are
+        positions in `files`, so existing ids never change.
+        """
+        new_ids: list[int] = []
+        with self._files_lock:
+            known = {p.resolve() for p in self.files}
+            for p in find_files(paths):
+                r = p.resolve()
+                if r in known:
+                    continue
+                known.add(r)
+                self.files.append(p)
+                self._locks.append(threading.Lock())
+                new_ids.append(len(self.files) - 1)
+        return new_ids
+
+    def ids_of(self, paths: list[str | Path]) -> list[int]:
+        """The ids of those paths, for the ones in the catalog."""
+        wanted = {Path(p).resolve() for p in paths}
+        return [i for i, p in enumerate(self.files) if p.resolve() in wanted]
 
     def listing(self) -> list[dict[str, Any]]:
         rows = []
@@ -167,12 +193,16 @@ class Catalog:
 
 class Handler(SimpleHTTPRequestHandler):
     catalog: Catalog
+    quiet: bool
 
-    def __init__(self, *args: Any, catalog: Catalog, **kwargs: Any) -> None:
+    def __init__(self, *args: Any, catalog: Catalog, quiet: bool = False, **kwargs: Any) -> None:
         self.catalog = catalog
+        self.quiet = quiet
         super().__init__(*args, directory=str(STATIC_DIR), **kwargs)
 
     def log_message(self, fmt: str, *args: Any) -> None:  # quieter console
+        if self.quiet or sys.stderr is None:  # no console in the windowed build
+            return
         if args and isinstance(args[0], str) and "/api/points" in args[0]:
             return
         super().log_message(fmt, *args)
@@ -279,18 +309,39 @@ class Handler(SimpleHTTPRequestHandler):
             self._send_json({"error": "no such route"}, HTTPStatus.NOT_FOUND)
 
 
-def make_server(files: list[Path], host: str = "127.0.0.1", port: int = 8765, max_loaded: int = 64) -> ThreadingHTTPServer:
-    catalog = Catalog(files, max_loaded=max_loaded)
-    handler = partial(Handler, catalog=catalog)
-    server = ThreadingHTTPServer((host, port), handler)
+class LpcServer(ThreadingHTTPServer):
+    """The HTTP server with its catalog attached, so callers can add files later."""
+
+    catalog: Catalog
+
+    @property
+    def url(self) -> str:
+        host, port = self.server_address[:2]
+        return f"http://{host}:{port}/"
+
+
+def make_server(files: list[Path], host: str = "127.0.0.1", port: int = 8765, max_loaded: int = 64,
+                quiet: bool = False) -> LpcServer:
+    """Bind the server. `port=0` takes a free port; `server.server_address` has the one taken."""
+    mimetypes.add_type("application/javascript", ".js")
+    catalog = Catalog(list(files), max_loaded=max_loaded)
+    handler = partial(Handler, catalog=catalog, quiet=quiet)
+    server = LpcServer((host, port), handler)
+    server.catalog = catalog
     server.daemon_threads = True
     return server
 
 
+def start_in_thread(server: LpcServer) -> threading.Thread:
+    """Serve on a daemon thread; `server.shutdown()` stops it."""
+    thread = threading.Thread(target=server.serve_forever, name="lpcview-http", daemon=True)
+    thread.start()
+    return thread
+
+
 def serve(files: list[Path], host: str = "127.0.0.1", port: int = 8765, open_browser: bool = False, max_loaded: int = 64) -> None:
-    mimetypes.add_type("application/javascript", ".js")
     server = make_server(files, host, port, max_loaded=max_loaded)
-    url = f"http://{host}:{server.server_address[1]}/"
+    url = server.url
     print(f"[lpcview] serving {len(files)} file(s) at {url}")
     for p in files:
         print(f"[lpcview]   {p}")

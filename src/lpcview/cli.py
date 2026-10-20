@@ -1,15 +1,35 @@
-"""Command line: `lpcview serve <files or dirs>` and `lpcview info <file>`."""
+"""Command line: `lpcview app [files]`, `lpcview serve <files or dirs>` and `lpcview info <file>`."""
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from typing import Any
 
 from . import __version__
 from .reader import load_cloud, read_metadata
 from .server import find_files, serve
+
+COMMANDS = ("app", "serve", "info")
+
+
+def normalise_argv(argv: list[str], frozen: bool = False) -> list[str]:
+    """What the parser sees.
+
+    The one-file build is double-clicked (no arguments) or given files by
+    "Open with" (arguments that are paths, no command): both mean `app`. From
+    the console, no arguments still prints the help.
+    """
+    if not argv:
+        return ["app"] if frozen else argv
+    first = argv[0]
+    if first in COMMANDS or first.startswith("-"):
+        return argv
+    if all(os.path.exists(a) for a in argv):
+        return ["app", *argv]
+    return argv
 
 
 def _fmt_int(n: int) -> str:
@@ -71,6 +91,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--version", action="version", version=f"lpcview {__version__}")
     sub = parser.add_subparsers(dest="command", required=True)
 
+    p_app = sub.add_parser("app", help="open the viewer in a window of its own")
+    p_app.add_argument("paths", nargs="*", help="LAS/LAZ files or directories of them (none: a file dialog)")
+    p_app.add_argument("--max-loaded", type=int, default=64,
+                       help="how many decoded files to keep in memory at once (default 64)")
+    p_app.add_argument("--no-maximize", action="store_true", help="open at 1400 x 900 instead of maximised")
+
     p_serve = sub.add_parser("serve", help="start the viewer on a local port")
     p_serve.add_argument("paths", nargs="+", help="LAS/LAZ files or directories of them")
     p_serve.add_argument("--host", default="127.0.0.1")
@@ -84,7 +110,16 @@ def main(argv: list[str] | None = None) -> int:
     p_info.add_argument("--json", action="store_true", help="print the full metadata as JSON")
     p_info.add_argument("--stats", action="store_true", help="decode the points and print statistics too")
 
+    argv = normalise_argv(sys.argv[1:] if argv is None else list(argv), frozen=getattr(sys, "frozen", False))
     args = parser.parse_args(argv)
+    if args.command == "app":
+        from .app import run
+
+        try:
+            return run(args.paths, max_loaded=args.max_loaded, maximized=not args.no_maximize)
+        except FileNotFoundError as exc:
+            print(f"lpcview: not found: {exc}", file=sys.stderr or sys.stdout)
+            return 2
     if args.command == "serve":
         try:
             files = find_files(args.paths)

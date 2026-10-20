@@ -410,6 +410,7 @@ window.addEventListener("keydown", (e) => {
   else if (k === "l") { if (locked) document.exitPointerLock(); else canvas.requestPointerLock(); }
   else if (k === "h") togglePanels();
   else if (k === "p") pickAt(canvas.clientWidth / 2, canvas.clientHeight / 2);
+  else if (k === "o") openFiles();
   else if (k === " ") { keys.add("e"); e.preventDefault(); }
   else keys.add(k);
   if (k.startsWith("arrow")) e.preventDefault();
@@ -665,20 +666,49 @@ function updateFilesCount() {
   const pts = ids.reduce((n, i) => n + Math.max(0, files[i].point_count), 0);
   ui.filesCount.textContent = `${ids.length} of ${files.length}, ${fmtInt(pts)} pts`;
 }
-async function loadFiles() {
+// (Re)list the server's files. On the first call the URL's ?files= picks the ticked
+// ones (all, by default); later calls keep the ticks and tick `select` (new files).
+async function loadFiles(select = null) {
+  const before = files.length ? new Set(selectedIds()) : null;
   files = await fetchJson("/api/files");
   const params = new URLSearchParams(location.search);
   const wanted = (params.get("files") || params.get("file") || "").split(",").filter((s) => s !== "").map(Number);
-  const checked = (f) => (wanted.length ? wanted.includes(f.id) : true);
-  ui.fileList.innerHTML = files.map((f) => `<label title="${esc(f.path)}"><input type="checkbox" data-file="${f.id}" ${checked(f) ? "checked" : ""}>
-    <span class="nm">${esc(f.name)}</span><span class="ct">${fmtInt(f.point_count)} pf${f.point_format}</span></label>`).join("");
+  const checked = (f) => (before ? before.has(f.id) || (select || []).includes(f.id) : wanted.length ? wanted.includes(f.id) : true);
+  ui.fileList.innerHTML = files.length
+    ? files.map((f) => `<label title="${esc(f.path)}"><input type="checkbox" data-file="${f.id}" ${checked(f) ? "checked" : ""}>
+    <span class="nm">${esc(f.name)}</span><span class="ct">${fmtInt(f.point_count)} pf${f.point_format}</span></label>`).join("")
+    : "<em>no files open</em>";
   ui.fileList.querySelectorAll("input").forEach((cb) => cb.addEventListener("change", updateFilesCount));
   ui.metaFile.innerHTML = files.map((f) => `<option value="${f.id}">${esc(f.name)}</option>`).join("");
   updateFilesCount();
-  const first = selectedIds()[0] ?? 0;
+  if (!files.length) { setStatus(window.pywebview ? "open a file (Open... or O)" : "no files; start lpcview with some"); return; }
+  const first = (select || []).find((i) => files[i]) ?? selectedIds()[0] ?? 0;
   ui.metaFile.value = String(first);
   await showMetadata(first);
 }
+
+// In the app (pywebview window), Open... asks Python for the native file dialog.
+let opening = false;
+async function openFiles() {
+  if (opening || !window.pywebview) return;
+  opening = true;
+  try {
+    const r = await window.pywebview.api.open_files();
+    if (r.error) { setStatus(r.error); return; }
+    if (r.cancelled) return;
+    await loadFiles(r.selected);
+    if (r.added.length) setStatus(`${r.added.length} file(s) opened; press Load`);
+  } catch (err) {
+    setStatus(`open failed: ${err.message || err}`);
+  } finally {
+    opening = false;
+  }
+}
+window.addEventListener("pywebviewready", () => {
+  $("open-btn").hidden = false;
+  if (!files.length) openFiles();
+});
+$("open-btn").addEventListener("click", openFiles);
 $("files-all").addEventListener("click", () => { ui.fileList.querySelectorAll("input").forEach((cb) => (cb.checked = true)); updateFilesCount(); });
 $("files-none").addEventListener("click", () => { ui.fileList.querySelectorAll("input").forEach((cb) => (cb.checked = false)); updateFilesCount(); });
 ui.metaFile.addEventListener("change", () => showMetadata(Number(ui.metaFile.value)));
