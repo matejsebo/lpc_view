@@ -54,9 +54,15 @@ uv run lpc_view info path/to/tile.laz --stats
   it goes. Several files load as one mosaic, each contributing in proportion to
   its size; the statistics and class list merge, and a picked point reports
   which file it came from. "all" loads every point; 20 M points take roughly
-  700 MB of GPU memory and as much again in the page. Decoded files stay in
-  memory (`--max-loaded` caps how many), so a 40 M point mosaic wants a few GB
-  of RAM.
+  700 MB of GPU memory and as much again in the page. Every load, "all"
+  included, is capped at what a quarter of the machine's memory holds (as the
+  browser reports it, 8 GB assumed when it does not, at 60 bytes a point), and
+  the status line says so: "capped at 12 M of 42 M points for this machine's
+  memory". Each streamed chunk is parsed and binned by cell in a Web Worker
+  while the next one downloads, so the view keeps drawing during a load; the
+  page only copies each cell's run into place. Decoded files stay in memory
+  (`--max-loaded` caps how many), so a 40 M point mosaic wants a few GB of
+  RAM.
 - **Level of detail**: the points sit in a grid of cells about 100 m square cut
   from the loaded extent, each filled in arrival order, so a prefix of a cell is
   a uniform sample of it. Every frame culls the cells outside the view and draws
@@ -137,13 +143,22 @@ is needed: Python, laspy, numpy and pyproj are in the exe.
   `__main__.py` runs it for `python -m lpc_view` and the exe.
 - `tools/build_exe.py`: the PyInstaller build.
 - `src/lpc_view/classes.py`: the ASPRS class table and colours.
-- `src/lpc_view/static/`: the page, its style, `app.js` (three.js scene, the
-  grid of cells and their level of detail, fly camera, GPU picking, panels) and
-  the vendored three.js r180 (MIT).
-- `tests/`: pytest, on a synthetic LAS/LAZ written with laspy.
+- `src/lpc_view/static/`: the page and its style, and the ES modules `app.js`
+  wires: `api.js` (token, fetch), `shaders.js` (GLSL, colour ramps, materials),
+  `cells.js` (the grid of cells, chunk ingest, level of detail, the point
+  budget cap), `camera.js` (fly controls and views), `picking.js` (GPU picks),
+  `panels.js` (the DOM: file list, class list, the five tabs), `classes.js`
+  (class colours, mirroring `classes.py`), `colormaps.js`, and the vendored
+  three.js r180 (MIT). Only `app.js` imports three.js; the other modules take
+  it as an argument, so their pure functions load in Node.
+- `tests/`: pytest, on a synthetic LAS/LAZ written with laspy; `tests/js/`: the
+  page's pure functions (chunk parsing, grid and pick-code maths, the level of
+  detail controller, the budget cap, the query split) under `node:test`, no
+  dependencies.
 
 ```bash
 uv run pytest
+npm test
 ```
 
 ## Notes

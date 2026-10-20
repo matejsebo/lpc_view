@@ -1,0 +1,10 @@
+{
+  "name": "lpc_view-page",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Node tests for the viewer page's pure functions (src/lpc_view/static); no dependencies",
+  "type": "module",
+  "scripts": {
+    "test": "node --test \"tests/js/*.test.js\""
+  }
+}
