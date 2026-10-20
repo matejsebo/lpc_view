@@ -93,12 +93,29 @@ Python side inside; no console. It is built with PyInstaller (a dev dependency):
 uv run python tools/build_exe.py
 ```
 
+`--onedir` builds a folder instead, `dist/lpc_view/`, with the exe next to its
+libraries; zip and ship the whole folder:
+
+```bash
+uv run python tools/build_exe.py --onedir
+```
+
+The one-file exe unpacks itself into a temporary folder at every start, which
+is slower (about 1.3 s to the window against 0.8 s for the folder, on a 22 MB
+LAZ) and is the kind of self-extracting program antivirus heuristics flag most
+often, so a fresh build may be quarantined or blocked by SmartScreen on another
+machine. The folder build starts faster and gets far fewer such false
+positives; prefer it for anything handed to other people. Either way the build
+is not signed. Sizes: 30 MB for the file, 84 MB for the folder.
+
 Double-click it, drop files on it, or set it as the "Open with" program for
 `.laz` and `.las`: an argument that is a path means `app`. From a console it
 takes the same commands as `lpc_view`, but being a windowed build it prints
 nothing, so use the uv install for `serve` and `info`. `--console` builds a
-console variant that does print; `--keep-build` keeps PyInstaller's work
-directory for a look at what was collected.
+console variant that does print (with either layout); `--keep-build` keeps
+PyInstaller's work directory for a look at what was collected. The script
+clears the other layout's output from `dist/` first, so it holds one build at a
+time.
 
 The window needs the **WebView2 runtime** (the Edge engine pywebview uses on
 Windows). Windows 11 has it, and so does any Windows 10 with Microsoft Edge or
@@ -155,3 +172,32 @@ uv run pytest
     to 1,775 m (14.0 M points drawn), 123 fps turning away (8 cells).
   - A click resolves to its file and index in every one of those views; the
     marker sits on the server's coordinates of the picked point.
+
+## Development
+
+```bash
+uv sync --all-extras --dev
+```
+
+installs everything, the test and build tools included. The Python tests:
+
+```bash
+uv run pytest
+```
+
+The page's tests, with Node 20 or later, once `tests/js/` exists:
+
+```bash
+node --test tests/js
+```
+
+Lint with ruff (no install needed beyond uv):
+
+```bash
+uvx ruff check src tools
+```
+
+Continuous integration, `.github/workflows/ci.yml`, runs those same commands on
+every push and pull request, on Windows and Ubuntu with Python 3.13 (the page
+tests only when `tests/js/` exists). The exe is not built in CI; see
+[Building the exe](#building-the-exe).
