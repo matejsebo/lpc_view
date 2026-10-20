@@ -26,7 +26,7 @@ def test_class_table():
 
 
 def test_gps_time_to_utc():
-    # 334339325.246 adjusted standard GPS time is 2022-04-18 17:48 UTC (Morgan's flight).
+    # 334339325.246 adjusted standard GPS time is 2022-04-18 17:48 UTC (a USGS 3DEP flight).
     assert gps_time_to_utc(334339325.246, "standard").startswith("2022-04-18T17:48:27")
     assert gps_time_to_utc(1234.5, "week") is None
 
