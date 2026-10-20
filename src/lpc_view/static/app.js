@@ -12,7 +12,7 @@
 import * as THREE from "three";
 import { bootstrapToken, apiFetch, fetchJson } from "./api.js";
 import { createShading } from "./shaders.js";
-import { createCells, NEAR_ALL } from "./cells.js";
+import { createCells, capBudget, NEAR_ALL } from "./cells.js";
 import { createFlyCamera } from "./camera.js";
 import { createPicker, makeMarker } from "./picking.js";
 import { $, ui, fmt, fmtInt, setStatus, setProgress, createPanels } from "./panels.js";
@@ -144,6 +144,9 @@ function setRgbOption(stats, hasColour) {
 
 let loading = null;      // AbortController while streaming
 
+// Point counts in millions for the status line: "12 M", "4.3 M", "850,000".
+const fmtM = (n) => (n >= 1e6 ? `${(n / 1e6).toFixed(n % 1e6 === 0 ? 0 : 1)} M` : fmtInt(n));
+
 ui.loadBtn.addEventListener("click", () => {
   const ids = panels.selectedIds();
   if (!ids.length) { setStatus("tick at least one file"); return; }
@@ -173,7 +176,10 @@ async function startLoad(ids) {
     cloud.center = info.center;
     cloud.stats = info.stats;
     const want = ui.budgetSelect.value === "all" ? info.point_count : Number(ui.budgetSelect.value);
-    cloud.budget = Math.min(want, info.point_count);
+    const { budget, capped } = capBudget(want, info.point_count, navigator.deviceMemory, !!info.stats.rgb);
+    cloud.budget = budget;
+    // Why the load stops short of what was asked, on the status line while it streams and after.
+    const capNote = capped ? `capped at ${fmtM(budget)} of ${fmtM(info.point_count)} points for this machine's memory` : "";
     panels.renderStats(info.stats);
     panels.buildClassList(info.stats);
     applyRanges();
@@ -188,9 +194,10 @@ async function startLoad(ids) {
       if (ctl.signal.aborted) return;
       cells.ingest(buf);
       setProgress(cloud.loaded / cloud.budget);
-      setStatus(`${fmtInt(cloud.loaded)} of ${fmtInt(cloud.budget)} points loaded`);
+      setStatus(`${fmtInt(cloud.loaded)} of ${fmtInt(cloud.budget)} points loaded${capNote ? ` (${capNote})` : ""}`);
     }
-    setStatus(`${fmtInt(cloud.loaded)} points loaded from ${ids.length} file${ids.length === 1 ? "" : "s"}${cloud.loaded < cloud.count ? ` (a uniform sample of ${fmtInt(cloud.count)})` : ""}`);
+    const sample = cloud.loaded < cloud.count ? [`a uniform sample of ${fmtInt(cloud.count)}`, capNote].filter(Boolean).join("; ") : "";
+    setStatus(`${fmtInt(cloud.loaded)} points loaded from ${ids.length} file${ids.length === 1 ? "" : "s"}${sample ? ` (${sample})` : ""}`);
   } catch (err) {
     if (err.name === "AbortError") setStatus(`stopped at ${fmtInt(cloud.loaded)} points`);
     else { setStatus(`load failed: ${err.message}`); console.error(err); }

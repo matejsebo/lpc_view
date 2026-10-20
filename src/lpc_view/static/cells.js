@@ -33,6 +33,32 @@ export const ATTRS = [["position", "pos", 3], ["intensity", "intensity", 1], ["c
 export const TARGET_MS = 16;
 export const NEAR_ALL = 1e6;                      // metres: farther than any cell, i.e. all
 
+// What a point costs in memory: its cell arrays (cellArrays below: 12 position,
+// 2 intensity, 1 each class, return, returns and flags, 2 source id, 4 angle,
+// 4 time, 4 stream index) and the same again on the GPU, less the stream index;
+// 3 more each with RGB. The cells' growth margins come on top of this.
+export const BYTES_PER_POINT = { arrays: 32, gpu: 28, rgb: 3 };
+export const DEFAULT_MEMORY_GB = 8;               // when navigator.deviceMemory is not there
+
+export function pointCost(hasRgb) {
+  return BYTES_PER_POINT.arrays + BYTES_PER_POINT.gpu + (hasRgb ? 2 * BYTES_PER_POINT.rgb : 0);
+}
+
+// The most points this machine should hold: a quarter of its memory (GB, as
+// navigator.deviceMemory reports it, DEFAULT_MEMORY_GB when it does not).
+export function budgetCap(deviceMemoryGb, hasRgb) {
+  const gb = deviceMemoryGb > 0 ? deviceMemoryGb : DEFAULT_MEMORY_GB;
+  return Math.floor((gb * 2 ** 30) / 4 / pointCost(hasRgb));
+}
+
+// The budget for a load of `want` points ("all" being the cloud's count) out of
+// `total`, and whether the machine's memory cut it.
+export function capBudget(want, total, deviceMemoryGb, hasRgb) {
+  const cap = budgetCap(deviceMemoryGb, hasRgb);
+  const budget = Math.min(want, total);
+  return { budget: Math.min(budget, cap), cap, capped: budget > cap };
+}
+
 // The loaded extent around the cloud's centre; without stats, a default box.
 export function extentOf(stats, center) {
   if (!stats) return { min: [-500, -500, -50], max: [500, 500, 50] };

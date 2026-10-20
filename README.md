@@ -54,9 +54,12 @@ uv run lpc_view info path/to/tile.laz --stats
   it goes. Several files load as one mosaic, each contributing in proportion to
   its size; the statistics and class list merge, and a picked point reports
   which file it came from. "all" loads every point; 20 M points take roughly
-  700 MB of GPU memory and as much again in the page. Decoded files stay in
-  memory (`--max-loaded` caps how many), so a 40 M point mosaic wants a few GB
-  of RAM.
+  700 MB of GPU memory and as much again in the page. Every load, "all"
+  included, is capped at what a quarter of the machine's memory holds (as the
+  browser reports it, 8 GB assumed when it does not, at 60 bytes a point), and
+  the status line says so: "capped at 12 M of 42 M points for this machine's
+  memory". Decoded files stay in memory (`--max-loaded` caps how many), so a
+  40 M point mosaic wants a few GB of RAM.
 - **Level of detail**: the points sit in a grid of cells about 100 m square cut
   from the loaded extent, each filled in arrival order, so a prefix of a cell is
   a uniform sample of it. Every frame culls the cells outside the view and draws
