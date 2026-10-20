@@ -394,6 +394,7 @@ def serve(files: list[Path], port: int = 8765, open_browser: bool = False, max_l
     print("[lpc_view] only this machine can reach it, and only through that URL (its token)")
     for p in files:
         print(f"[lpc_view]   {p}")
+    sys.stdout.flush()  # the URL must appear at once, even when stdout is a pipe
     if open_browser:
         import webbrowser
 
