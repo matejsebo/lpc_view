@@ -49,7 +49,7 @@ from .reader import CloudSet, PointCloud, file_sha256, load_cloud, read_metadata
 STATIC_DIR = Path(__file__).parent / "static"
 LAS_SUFFIXES = {".las", ".laz"}
 LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
-TOKEN_HEADER = "X-Lpc-Token"
+TOKEN_HEADER = "X-Lpc-Token"  # noqa: S105 - the header's name, not a secret
 MAX_POINTS_PER_REQUEST = 2_000_000  # one /api/points chunk; the page asks for 500,000
 
 
@@ -128,20 +128,20 @@ class Catalog:
             try:
                 st = p.stat()
                 key = (str(p), st.st_mtime_ns, st.st_size)
+                stat_error = None
             except OSError as exc:
-                key = (str(p), -1, -1)
-                st = None
+                st, key, stat_error = None, (str(p), -1, -1), f"error: {exc}"
             cached = self._rows.get(i)
             if cached is None or cached[0] != key:
                 if st is None:
-                    count, pf, version = -1, -1, f"error: {exc}"
+                    count, pf, version = -1, -1, stat_error
                 else:
                     try:
                         with laspy.open(p) as r:
                             count = int(r.header.point_count)
                             pf = int(r.header.point_format.id)
                             version = str(r.header.version)
-                    except Exception as exc:  # noqa: BLE001
+                    except Exception as exc:  # a file that is not LAS: say so in its row
                         count, pf, version = -1, -1, f"error: {exc}"
                 row = {
                     "id": i,
@@ -211,7 +211,7 @@ class Catalog:
             return None
         try:
             lon, lat = tr.transform(x, y)
-        except Exception:  # noqa: BLE001
+        except Exception:  # any failure means no coordinates, not an error
             return None
         return (float(lon), float(lat))
 
@@ -226,7 +226,7 @@ class Catalog:
             if crs.is_compound and crs.sub_crs_list:
                 crs = crs.sub_crs_list[0]
             return pyproj.Transformer.from_crs(crs, "EPSG:4326", always_xy=True)
-        except Exception:  # noqa: BLE001
+        except Exception:  # any failure means no coordinates, not an error
             return None
 
 
@@ -315,7 +315,7 @@ class Handler(SimpleHTTPRequestHandler):
 
     # -- routing ---------------------------------------------------------------
 
-    def do_GET(self) -> None:  # noqa: N802 - http.server API
+    def do_GET(self) -> None:  # http.server's name for it
         parts = urlsplit(self.path)
         if not self._host_is_loopback():
             self._send_json({"error": "lpc_view answers only on this machine"}, HTTPStatus.FORBIDDEN)
@@ -341,7 +341,7 @@ class Handler(SimpleHTTPRequestHandler):
                 self._send_json({"error": f"bad request: {exc}"}, HTTPStatus.BAD_REQUEST)
             except FileNotFoundError as exc:
                 self._send_json({"error": f"not found: {exc}"}, HTTPStatus.NOT_FOUND)
-            except Exception as exc:  # noqa: BLE001 - report, don't crash the thread
+            except Exception as exc:  # report, don't crash the thread
                 self._send_json({"error": f"{type(exc).__name__}: {exc}"},
                                 HTTPStatus.INTERNAL_SERVER_ERROR)
             return

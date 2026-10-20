@@ -24,7 +24,7 @@ import numpy as np
 from .classes import class_color, class_name
 
 CHUNK_MAGIC = b"LPC2"
-GPS_EPOCH = dt.datetime(1980, 1, 6, tzinfo=dt.timezone.utc)
+GPS_EPOCH = dt.datetime(1980, 1, 6, tzinfo=dt.UTC)
 GPS_UTC_LEAP_SECONDS = 18  # since 2017-01-01; the LAS header does not say
 ADJUSTED_GPS_OFFSET = 1.0e9
 
@@ -79,7 +79,7 @@ def _describe_vlr(vlr: Any) -> dict[str, Any]:
     kind = type(vlr).__name__
     try:
         raw = bytes(vlr.record_data_bytes())
-    except Exception:  # noqa: BLE001 - a VLR type without raw access
+    except Exception:  # a VLR type without raw access
         raw = b""
     out: dict[str, Any] = {
         "user_id": vlr.user_id,
@@ -146,9 +146,8 @@ def _parse_laszip_vlr(raw: bytes) -> dict[str, Any]:
     compressor, coder, vmaj, vmin, vrev, options, chunk_size = struct.unpack_from(
         "<HHBBHII", raw, 0
     )
-    num_special, num_items = struct.unpack_from("<qq", raw, 16)[0:1] + (
-        struct.unpack_from("<H", raw, 32)[0],
-    )
+    num_special = struct.unpack_from("<q", raw, 16)[0]  # then the offset to them (i64), not shown
+    num_items = struct.unpack_from("<H", raw, 32)[0]
     items = []
     off = 34
     item_names = {
@@ -195,7 +194,7 @@ def _parse_laszip_vlr(raw: bytes) -> dict[str, Any]:
 def _crs_info(header: laspy.LasHeader) -> dict[str, Any] | None:
     try:
         crs = header.parse_crs()
-    except Exception as exc:  # noqa: BLE001 - laspy raises assorted errors on odd VLRs
+    except Exception as exc:  # laspy raises assorted errors on odd VLRs
         return {"error": f"could not parse: {exc}"}
     if crs is None:
         return None
@@ -208,7 +207,7 @@ def _crs_info(header: laspy.LasHeader) -> dict[str, Any] | None:
         }
         try:
             d["datum"] = c.datum.name if c.datum is not None else None
-        except Exception:  # noqa: BLE001
+        except Exception:  # pyproj: whatever it cannot say, leave out
             d["datum"] = None
         try:
             d["axes"] = [
@@ -220,11 +219,11 @@ def _crs_info(header: laspy.LasHeader) -> dict[str, Any] | None:
                 }
                 for a in c.axis_info
             ]
-        except Exception:  # noqa: BLE001
+        except Exception:  # pyproj: whatever it cannot say, leave out
             d["axes"] = []
         try:
             d["area_of_use"] = str(c.area_of_use) if c.area_of_use else None
-        except Exception:  # noqa: BLE001
+        except Exception:  # pyproj: whatever it cannot say, leave out
             d["area_of_use"] = None
         return d
 
@@ -234,7 +233,7 @@ def _crs_info(header: laspy.LasHeader) -> dict[str, Any] | None:
     info["is_compound"] = bool(crs.is_compound)
     try:
         info["wkt"] = crs.to_wkt(pretty=True)
-    except Exception:  # noqa: BLE001
+    except Exception:  # pyproj: whatever it cannot say, leave out
         info["wkt"] = None
     return info
 
@@ -676,9 +675,9 @@ def load_cloud(path: str | os.PathLike[str], max_points: int | None = None) -> P
         has_rgb = {"red", "green", "blue"} <= names
         fine_scan = "scan_angle" in names  # point formats 6-10: 0.006 degree units
 
-        X = np.empty(n, dtype=np.int32)
-        Y = np.empty(n, dtype=np.int32)
-        Z = np.empty(n, dtype=np.int32)
+        raw_x = np.empty(n, dtype=np.int32)
+        raw_y = np.empty(n, dtype=np.int32)
+        raw_z = np.empty(n, dtype=np.int32)
         intensity = np.zeros(n, dtype=np.uint16)
         classification = np.zeros(n, dtype=np.uint8)
         return_number = np.zeros(n, dtype=np.uint8)
@@ -725,9 +724,9 @@ def load_cloud(path: str | os.PathLike[str], max_points: int | None = None) -> P
                 break
             m = min(len(chunk), n - pos)
             sl = slice(pos, pos + m)
-            X[sl] = np.asarray(chunk["X"])[:m]
-            Y[sl] = np.asarray(chunk["Y"])[:m]
-            Z[sl] = np.asarray(chunk["Z"])[:m]
+            raw_x[sl] = np.asarray(chunk["X"])[:m]
+            raw_y[sl] = np.asarray(chunk["Y"])[:m]
+            raw_z[sl] = np.asarray(chunk["Z"])[:m]
             for name, arr in plain:
                 arr[sl] = np.asarray(chunk[name])[:m]
             for name, bit in flag_bits:
@@ -743,7 +742,7 @@ def load_cloud(path: str | os.PathLike[str], max_points: int | None = None) -> P
 
     if pos < n:  # the header promised more points than the file holds
         n = pos
-        X, Y, Z = X[:n].copy(), Y[:n].copy(), Z[:n].copy()
+        raw_x, raw_y, raw_z = raw_x[:n].copy(), raw_y[:n].copy(), raw_z[:n].copy()
         intensity, classification = intensity[:n].copy(), classification[:n].copy()
         return_number, number_of_returns = return_number[:n].copy(), number_of_returns[:n].copy()
         point_source_id, user_data = point_source_id[:n].copy(), user_data[:n].copy()
@@ -780,9 +779,9 @@ def load_cloud(path: str | os.PathLike[str], max_points: int | None = None) -> P
         scale=np.asarray(h.scales, dtype=np.float64),
         offset=np.asarray(h.offsets, dtype=np.float64),
         center=(mins + maxs) / 2.0,
-        X=X,
-        Y=Y,
-        Z=Z,
+        X=raw_x,
+        Y=raw_y,
+        Z=raw_z,
         intensity=intensity,
         classification=classification,
         return_number=return_number,
@@ -903,7 +902,7 @@ class CloudSet:
         n = self.count
         out: dict[str, Any] = {
             "point_count": n,
-            "files": [{"id": i, "name": Path(c.path).name, "count": c.count} for i, c in zip(self.ids, self.clouds)],
+            "files": [{"id": i, "name": Path(c.path).name, "count": c.count} for i, c in zip(self.ids, self.clouds, strict=True)],
         }
         if n == 0:
             return out

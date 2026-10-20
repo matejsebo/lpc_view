@@ -83,7 +83,7 @@ def print_info(meta: dict[str, Any], stats: dict[str, Any] | None) -> None:
             print(f"  gps time ({g['type']}): {g['min']:.3f} .. {g['max']:.3f}"
                   f"  ({g['span_seconds']:.0f} s)  {g['min_utc']} .. {g['max_utc']}")
         fl = stats["flags"]
-        print(f"  flags: " + ", ".join(f"{k} {v}" for k, v in fl.items()))
+        print("  flags: " + ", ".join(f"{k} {v}" for k, v in fl.items()))
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -4,7 +4,7 @@ import pytest
 
 pytest.importorskip("webview")  # the `app` extra
 
-from lpc_view.app import Api  # noqa: E402
+from lpc_view.app import Api
 from lpc_view.cli import normalise_argv
 from lpc_view.server import make_server
 

@@ -286,3 +286,19 @@ def test_listing_reads_each_header_once_until_the_file_changes(sample_las, sampl
     assert [r["name"] for r in rows] == ["sample.las", "sample.laz", "c.las"] and rows[2]["point_count"] == N_POINTS
     assert opened == ["sample.laz", "c.las"]
     assert cat.listing() == rows and len(opened) == 2
+
+
+def test_listing_reports_a_vanished_or_broken_file_in_its_row(sample_las, tmp_path):
+    from lpc_view.server import Catalog
+
+    gone = tmp_path / "gone.las"
+    gone.write_bytes(sample_las.read_bytes())
+    junk = tmp_path / "junk.laz"
+    junk.write_bytes(b"not a point cloud")
+    cat = Catalog([sample_las, gone, junk])
+    gone.unlink()
+    rows = cat.listing()
+    assert rows[0]["point_count"] == N_POINTS
+    assert rows[1]["point_count"] == -1 and rows[1]["version"].startswith("error:") and rows[1]["size_bytes"] == -1
+    assert rows[2]["point_count"] == -1 and rows[2]["version"].startswith("error:")
+    assert cat.listing() == rows

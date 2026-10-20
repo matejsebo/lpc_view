@@ -55,7 +55,7 @@ def test_chunk_carries_segments_and_arrays(pair):
     assert len(blob) == expected
     pos = np.frombuffer(blob, dtype="<f4", count=3 * count, offset=off).reshape(count, 3)
     # The first segment's positions are file 0's points at its local range, relative to the set centre.
-    file_id, a, n = segs[0]
+    _file_id, a, n = segs[0]
     c = pair.clouds[0]
     want = (c.xyz(c.order[a : a + n]) - pair.center).astype(np.float32)
     assert np.allclose(pos[:n], want, atol=1e-3)

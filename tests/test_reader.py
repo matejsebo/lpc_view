@@ -74,7 +74,7 @@ def test_cloud_arrays_and_stats(sample_las):
     assert cloud.X.dtype == np.int32
     xyz = cloud.xyz(slice(None))
     assert xyz.shape == (N_POINTS, 3)
-    assert 600000.0 <= xyz[:, 0].min() and xyz[:, 0].max() <= 600100.0
+    assert xyz[:, 0].min() >= 600000.0 and xyz[:, 0].max() <= 600100.0
     assert np.count_nonzero(cloud.flags & FLAG_WITHHELD) == 7
     assert cloud.scan_angle.dtype == np.float32
     assert abs(cloud.scan_angle).max() <= 18.0 + 1e-3  # 3000 * 0.006
