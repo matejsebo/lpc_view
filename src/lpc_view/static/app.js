@@ -12,7 +12,7 @@
 import * as THREE from "three";
 import { bootstrapToken, apiFetch, fetchJson } from "./api.js";
 import { createShading } from "./shaders.js";
-import { createCells, capBudget, NEAR_ALL } from "./cells.js";
+import { createCells, capBudget, chunkCount, NEAR_ALL } from "./cells.js";
 import { createFlyCamera } from "./camera.js";
 import { createPicker, makeMarker } from "./picking.js";
 import { $, ui, fmt, fmtInt, setStatus, setProgress, createPanels } from "./panels.js";
@@ -143,6 +143,7 @@ function setRgbOption(stats, hasColour) {
 // ---------------------------------------------------------------------------
 
 let loading = null;      // AbortController while streaming
+const ingestMs = [];     // main-thread time per chunk, for the debug handle
 
 // Point counts in millions for the status line: "12 M", "4.3 M", "850,000".
 const fmtM = (n) => (n >= 1e6 ? `${(n / 1e6).toFixed(n % 1e6 === 0 ? 0 : 1)} M` : fmtInt(n));
@@ -185,17 +186,36 @@ async function startLoad(ids) {
     applyRanges();
     setRgbOption(info.stats, cells.allocate(cloud.budget, info.stats, ui.bounds.checked));
     fly.fitView();
+    // Each chunk goes to the ingest worker to be binned by cell while the next one
+    // is fetched; the main thread then appends it, one copy per cell, in order.
     const chunk = 500000;
+    let queued = 0;          // points sent to be binned so far: the next chunk's stream position
+    let pending = null;      // the binned chunk still to append
+    const append = async () => {
+      const b = await pending;
+      pending = null;
+      if (ctl.signal.aborted) return;
+      const t0 = performance.now();
+      cells.applyBinned(b);
+      ingestMs.push(performance.now() - t0);
+      setProgress(cloud.loaded / cloud.budget);
+      setStatus(`${fmtInt(cloud.loaded)} of ${fmtInt(cloud.budget)} points loaded${capNote ? ` (${capNote})` : ""}`);
+    };
     for (let start = 0; start < cloud.budget; start += chunk) {
       const n = Math.min(chunk, cloud.budget - start);
       const r = await apiFetch(`/api/points?files=${filesParam}&start=${start}&count=${n}`, { signal: ctl.signal });
       if (!r.ok) throw new Error(`chunk ${start}: HTTP ${r.status}`);
       const buf = await r.arrayBuffer();
       if (ctl.signal.aborted) return;
-      cells.ingest(buf);
-      setProgress(cloud.loaded / cloud.budget);
-      setStatus(`${fmtInt(cloud.loaded)} of ${fmtInt(cloud.budget)} points loaded${capNote ? ` (${capNote})` : ""}`);
+      const count = chunkCount(buf);
+      const binned = cells.binAsync(buf, queued);
+      queued += count;
+      if (pending) await append();
+      if (ctl.signal.aborted) return;
+      pending = binned;
     }
+    if (pending) await append();
+    if (ctl.signal.aborted) return;
     const sample = cloud.loaded < cloud.count ? [`a uniform sample of ${fmtInt(cloud.count)}`, capNote].filter(Boolean).join("; ") : "";
     setStatus(`${fmtInt(cloud.loaded)} points loaded from ${ids.length} file${ids.length === 1 ? "" : "s"}${sample ? ` (${sample})` : ""}`);
   } catch (err) {
@@ -215,6 +235,6 @@ panels.loadFiles().catch((err) => setStatus(`could not list files: ${err.message
 if (debug) {
   window.lpc_view = {
     pickAt: picker.pickAt, cloud, cam, lod, uniforms, fitView: fly.fitView, topView: fly.topView, eyeLevel: fly.eyeLevel, startLoad,
-    pickBuffer: picker.pickBuffer, get cells() { return cells.group; }, renderer, scene, camera,
+    pickBuffer: picker.pickBuffer, get cells() { return cells.group; }, renderer, scene, camera, ingestMs,
   };
 }

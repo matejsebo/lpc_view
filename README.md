@@ -58,8 +58,11 @@ uv run lpc_view info path/to/tile.laz --stats
   included, is capped at what a quarter of the machine's memory holds (as the
   browser reports it, 8 GB assumed when it does not, at 60 bytes a point), and
   the status line says so: "capped at 12 M of 42 M points for this machine's
-  memory". Decoded files stay in memory (`--max-loaded` caps how many), so a
-  40 M point mosaic wants a few GB of RAM.
+  memory". Each streamed chunk is parsed and binned by cell in a Web Worker
+  while the next one downloads, so the view keeps drawing during a load; the
+  page only copies each cell's run into place. Decoded files stay in memory
+  (`--max-loaded` caps how many), so a 40 M point mosaic wants a few GB of
+  RAM.
 - **Level of detail**: the points sit in a grid of cells about 100 m square cut
   from the loaded extent, each filled in arrival order, so a prefix of a cell is
   a uniform sample of it. Every frame culls the cells outside the view and draws

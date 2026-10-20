@@ -1,7 +1,7 @@
 // Chunk parsing and segment lookup (static/cells.js), on hand-built LPC2 buffers.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { parseChunk, segmentOf } from "../../src/lpc_view/static/cells.js";
+import { binChunk, binnedBuffers, chunkCount, parseChunk, segmentOf } from "../../src/lpc_view/static/cells.js";
 
 // An LPC2 chunk of `points` ({x, y, z, i, c, r, nr, p, a, t, f, rgb?}) in the
 // layout reader.CloudSet documents: magic, count u32, has_rgb u8, has_time u8,
@@ -102,4 +102,35 @@ test("segmentOf finds the segment holding a stream index", () => {
   // The point's index in its file, as pickAt computes it.
   const s = segmentOf(segs, 17);
   assert.equal(s.local + (17 - s.start), 12);
+});
+
+test("binChunk sorts a chunk's points by cell with offsets, stream indices and z ranges", () => {
+  // A 2 x 2 grid of 10 m cells from (0, 0); five points, two of them strays.
+  const grid = { nx: 2, ny: 2, x0: 0, y0: 0, dx: 10, dy: 10 };
+  const points = [
+    { ...pt(1, true), x: 15, y: 5, z: 3 },      // cell 1
+    { ...pt(2, true), x: 5, y: 15, z: 7 },      // cell 2
+    { ...pt(3, true), x: 12, y: 2, z: -1 },     // cell 1
+    { ...pt(4, true), x: 99, y: -99, z: 0 },    // stray: clamped to cell 1
+    { ...pt(5, true), x: 1, y: 1, z: 5 },       // cell 0
+  ];
+  const c = parseChunk(buildChunk(points, [[0, 0, 5]], true), 1000);
+  const b = binChunk(c, grid, 1000);
+  assert.equal(b.n, 5);
+  assert.equal(b.start, 1000);
+  assert.deepEqual(Array.from(b.counts), [1, 3, 1, 0]);
+  assert.deepEqual(Array.from(b.offsets), [0, 1, 4, 5]);
+  // Cell order, arrival order within a cell: points 5; 1, 3, 4; 2.
+  assert.deepEqual(Array.from(b.arrays.stream), [1004, 1000, 1002, 1003, 1001]);
+  assert.deepEqual(Array.from(b.arrays.intensity), [1005, 1001, 1003, 1004, 1002]);
+  assert.deepEqual(Array.from(b.arrays.pos).filter((_, i) => i % 3 === 2), [5, 3, -1, 0, 7]);
+  assert.deepEqual(Array.from(b.arrays.rgb.subarray(0, 6)), [5, 10, 15, 1, 2, 3]);
+  assert.deepEqual(Array.from(b.zmin), [5, -1, 7, Infinity]);
+  assert.deepEqual(Array.from(b.zmax), [5, 3, 7, -Infinity]);
+  assert.deepEqual(b.segments, [{ file: 0, local: 0, count: 5, start: 1000 }]);
+  // Every buffer the worker transfers is distinct and belongs to the binned chunk.
+  const bufs = binnedBuffers(b);
+  assert.equal(new Set(bufs).size, bufs.length);
+  assert.ok(bufs.includes(b.arrays.stream.buffer) && bufs.includes(b.counts.buffer));
+  assert.equal(chunkCount(buildChunk(points, [[0, 0, 5]], true)), 5);
 });

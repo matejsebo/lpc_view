@@ -189,6 +189,52 @@ export function cellArrays(cap, hasRgb) {
   };
 }
 
+// The point count in a chunk's header, readable before the buffer is handed to
+// the worker.
+export function chunkCount(buf) {
+  const dv = new DataView(buf);
+  if (String.fromCharCode(dv.getUint8(0), dv.getUint8(1), dv.getUint8(2), dv.getUint8(3)) !== "LPC2") throw new Error("bad chunk");
+  return dv.getUint32(4, true);
+}
+
+// The grid's numbers, which a worker can be sent.
+export function gridParams(grid) {
+  return { nx: grid.nx, ny: grid.ny, x0: grid.x0, y0: grid.y0, dx: grid.dx, dy: grid.dy };
+}
+
+// Sort a parsed chunk's points by cell, so that each cell takes its share with
+// one copy: the count and offset of every cell, the arrays in cell order (stream
+// indices counted from `start`, the points loaded before this chunk) and each
+// cell's z range. Pure; the ingest worker runs it off the main thread.
+export function binChunk(c, grid, start) {
+  const n = c.n, ncells = grid.nx * grid.ny;
+  const target = new Uint32Array(n), counts = new Uint32Array(ncells);
+  for (let i = 0; i < n; i++) { const t = cellIndex(grid, c.pos[3 * i], c.pos[3 * i + 1]); target[i] = t; counts[t]++; }
+  const offsets = new Uint32Array(ncells);
+  for (let t = 0, o = 0; t < ncells; t++) { offsets[t] = o; o += counts[t]; }
+  const cursor = offsets.slice();
+  const a = cellArrays(n, c.hasRgb);
+  const zmin = new Float32Array(ncells).fill(Infinity), zmax = new Float32Array(ncells).fill(-Infinity);
+  for (let i = 0; i < n; i++) {
+    const t = target[i], k = cursor[t]++;
+    const z = c.pos[3 * i + 2];
+    a.pos[3 * k] = c.pos[3 * i]; a.pos[3 * k + 1] = c.pos[3 * i + 1]; a.pos[3 * k + 2] = z;
+    a.intensity[k] = c.intensity[i]; a.cls[k] = c.cls[i]; a.ret[k] = c.ret[i]; a.nret[k] = c.nret[i]; a.psid[k] = c.psid[i];
+    a.angle[k] = c.angle[i]; a.time[k] = c.time[i]; a.flags[k] = c.flags[i]; a.stream[k] = start + i;
+    if (a.rgb) { a.rgb[3 * k] = c.rgb[3 * i]; a.rgb[3 * k + 1] = c.rgb[3 * i + 1]; a.rgb[3 * k + 2] = c.rgb[3 * i + 2]; }
+    if (z < zmin[t]) zmin[t] = z;
+    if (z > zmax[t]) zmax[t] = z;
+  }
+  return { n, start, hasRgb: c.hasRgb, segments: c.segments, counts, offsets, zmin, zmax, arrays: a };
+}
+
+// A binned chunk's buffers, for postMessage to transfer rather than copy.
+export function binnedBuffers(b) {
+  const out = [b.counts.buffer, b.offsets.buffer, b.zmin.buffer, b.zmax.buffer];
+  for (const k of Object.keys(b.arrays)) if (b.arrays[k]) out.push(b.arrays[k].buffer);
+  return out;
+}
+
 // The cells in the scene: a THREE.Group of one THREE.Points per grid cell, the
 // extent box, and the LOD state. `cloud` is the shared bookkeeping (stats, center,
 // budget, loaded, grid, segments).
@@ -278,49 +324,89 @@ export function createCells({ THREE, scene, camera, shading, cloud }) {
     return !!stats.rgb && ["red", "green", "blue"].some((k) => stats.rgb[k].max > 0);
   }
 
-  // Append a chunk after the points already loaded, each point into its cell. A chunk
-  // asked for as stream positions [s, s+count) holds the mosaic's points at those
-  // positions, which is count points give or take one per file (each file contributes
-  // floor(p * n_k / N) points below position p), so chunks are placed by their actual
-  // counts, not by s.
-  function ingest(buf) {
+  // Append a binned chunk after the points already loaded: each cell takes its
+  // run of the chunk's arrays with one copy. A chunk asked for as stream positions
+  // [s, s+count) holds the mosaic's points at those positions, which is count
+  // points give or take one per file (each file contributes floor(p * n_k / N)
+  // points below position p), so chunks are placed by their actual counts, not by
+  // s: the binned chunk's `start` must be the points loaded so far.
+  function applyBinned(b) {
     const start = cloud.loaded;
-    const { n, segments, pos, intensity, cls, ret, nret, psid, angle, time, flags, rgb } = parseChunk(buf, start);
-    for (const seg of segments) cloud.segments.push(seg);
+    if (b.start !== start) throw new Error(`chunk binned for stream position ${b.start} applied at ${start}`);
     const grid = cloud.grid;
-    // Which cell each point goes to, and how many each cell gets, so a cell grows once.
-    const target = new Uint32Array(n), counts = new Uint32Array(grid.cells.length);
-    for (let i = 0; i < n; i++) { const c = cellIndex(grid, pos[3 * i], pos[3 * i + 1]); target[i] = c; counts[c]++; }
-    const cursor = new Uint32Array(grid.cells.length);
+    for (const seg of b.segments) cloud.segments.push(seg);
+    const { counts, offsets, arrays } = b;
     for (let c = 0; c < counts.length; c++) {
-      if (!counts[c]) continue;
+      const count = counts[c];
+      if (!count) continue;
       const cell = grid.cells[c];
-      if (start === 0) cell.expected = (counts[c] * cloud.budget) / n;
-      if (cell.n + counts[c] > cell.cap) growCell(cell, cell.n + counts[c]);
-      cursor[c] = cell.n;
-    }
-    for (let i = 0; i < n; i++) {
-      const cell = grid.cells[target[i]], a = cell.arrays, k = cursor[target[i]]++;
-      const z = pos[3 * i + 2];
-      a.pos[3 * k] = pos[3 * i]; a.pos[3 * k + 1] = pos[3 * i + 1]; a.pos[3 * k + 2] = z;
-      a.intensity[k] = intensity[i]; a.cls[k] = cls[i]; a.ret[k] = ret[i]; a.nret[k] = nret[i]; a.psid[k] = psid[i];
-      a.angle[k] = angle[i]; a.time[k] = time[i]; a.flags[k] = flags[i]; a.stream[k] = start + i;
-      if (a.rgb && rgb) { a.rgb[3 * k] = rgb[3 * i]; a.rgb[3 * k + 1] = rgb[3 * i + 1]; a.rgb[3 * k + 2] = rgb[3 * i + 2]; }
-      if (z < cell.zmin) cell.zmin = z;
-      if (z > cell.zmax) cell.zmax = z;
-    }
-    for (let c = 0; c < counts.length; c++) {
-      if (!counts[c]) continue;
-      const cell = grid.cells[c];
+      // The first chunk is a uniform sample of the whole load, so a cell's share
+      // of it says how many points it will get.
+      if (start === 0) cell.expected = (count * cloud.budget) / b.n;
+      if (cell.n + count > cell.cap) growCell(cell, cell.n + count);
+      const a = cell.arrays, off = offsets[c];
+      for (const k of Object.keys(a)) {
+        if (!a[k] || !arrays[k]) continue;
+        const items = k === "pos" || k === "rgb" ? 3 : 1;
+        a[k].set(arrays[k].subarray(off * items, (off + count) * items), cell.n * items);
+      }
+      if (b.zmin[c] < cell.zmin) cell.zmin = b.zmin[c];
+      if (b.zmax[c] > cell.zmax) cell.zmax = b.zmax[c];
       for (const [name, key, items] of ATTRS) {
         if (key === "rgb" && !grid.hasRgb) continue;
         const attr = cell.geometry.getAttribute(name);
-        attr.addUpdateRange(cell.n * items, counts[c] * items);
+        attr.addUpdateRange(cell.n * items, count * items);
         attr.needsUpdate = true;
       }
-      cell.n += counts[c];
+      cell.n += count;
     }
-    cloud.loaded = start + n;
+    cloud.loaded = start + b.n;
+  }
+
+  // Parse, bin and append a chunk here, on the main thread.
+  function ingest(buf) {
+    applyBinned(binChunk(parseChunk(buf, cloud.loaded), cloud.grid, cloud.loaded));
+  }
+
+  // The ingest worker parses and bins chunks off the main thread (ingest_worker.js)
+  // and answers them in the order they were sent. When workers are not to be had,
+  // or the worker fails, the binning runs here.
+  let worker = null, workerFailed = false;
+  const waiting = [];      // {resolve, reject} per chunk sent, in order
+  function getWorker() {
+    if (worker || workerFailed || typeof Worker === "undefined") return worker;
+    try {
+      worker = new Worker(new URL("./ingest_worker.js", import.meta.url), { type: "module" });
+      worker.onmessage = (e) => {
+        const w = waiting.shift();
+        if (!w) return;
+        if (e.data.error) w.reject(new Error(e.data.error)); else w.resolve(e.data);
+      };
+      worker.onerror = (e) => {
+        workerFailed = true;
+        const err = new Error(`ingest worker failed: ${e.message || "could not start"}`);
+        for (const w of waiting.splice(0)) w.reject(err);
+        worker.terminate();
+        worker = null;
+      };
+    } catch (e) {
+      workerFailed = true;
+      worker = null;
+    }
+    return worker;
+  }
+
+  // Bin a chunk for stream position `start` (the points queued before it), in the
+  // worker when there is one (the buffer is transferred); the result goes to
+  // applyBinned, in order.
+  function binAsync(buf, start) {
+    const grid = cloud.grid;
+    const w = getWorker();
+    if (!w) return Promise.resolve(binChunk(parseChunk(buf, start), grid, start));
+    return new Promise((resolve, reject) => {
+      waiting.push({ resolve, reject });
+      w.postMessage({ buf, grid: gridParams(grid), start }, [buf]);
+    });
   }
 
   // Drop the cells and the extent box, freeing their GPU buffers, and reset the
@@ -358,7 +444,7 @@ export function createCells({ THREE, scene, camera, shading, cloud }) {
   }
 
   return {
-    lod, makeGrid, cellsAround, growCell, allocate, ingest, dispose, updateLod, applyLod,
+    lod, makeGrid, cellsAround, growCell, allocate, ingest, binAsync, applyBinned, dispose, updateLod, applyLod,
     get group() { return cellGroup; },
     get boundsHelper() { return boundsHelper; },
   };
