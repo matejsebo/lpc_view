@@ -184,6 +184,10 @@ def test_errors_are_json(server):
     assert status == 404 and "error" in json.loads(body)
     status, _, _ = get(server + "/nothing.html")
     assert status == 404
+    # No directory listings: the static tree is served file by file only.
+    for path in ("/static/", "/static", "/static/vendor/", "/static/vendor"):
+        status, body, _ = get(server + path)
+        assert status == 404 and b"Directory listing" not in body, path
 
 
 def test_eviction_keeps_a_set_whole_and_drops_sets_with_their_clouds(sample_las, sample_laz, tmp_path):

@@ -238,6 +238,10 @@ class Handler(SimpleHTTPRequestHandler):
         given = self.headers.get(TOKEN_HEADER) or (q.get("token") or [""])[0]
         return bool(given) and secrets.compare_digest(given, self.token)
 
+    def list_directory(self, path: Any) -> None:  # no directory listings of static/
+        self.send_error(HTTPStatus.NOT_FOUND)
+        return None
+
     def log_message(self, fmt: str, *args: Any) -> None:  # quieter console
         if self.quiet or sys.stderr is None:  # no console in the windowed build
             return
@@ -299,6 +303,9 @@ class Handler(SimpleHTTPRequestHandler):
             return super().do_GET()
         if parts.path.startswith("/static/"):
             self.path = parts.path[len("/static") :]
+            if Path(self.translate_path(self.path)).is_dir():  # files only, no index or listing
+                self.send_error(HTTPStatus.NOT_FOUND)
+                return None
             return super().do_GET()
         if parts.path.startswith("/api/"):
             q = parse_qs(parts.query, keep_blank_values=True)
