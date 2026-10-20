@@ -116,6 +116,13 @@ def main(argv: list[str] | None = None) -> int:
 
         try:
             return run(args.paths, max_loaded=args.max_loaded, maximized=not args.no_maximize)
+        except ModuleNotFoundError as exc:
+            if exc.name != "webview":
+                raise
+            print("lpc_view: the window needs pywebview, the `app` extra: uv sync --extra app"
+                  " (or pip install 'lpc_view[app]'); `lpc_view serve` works without it",
+                  file=sys.stderr or sys.stdout)
+            return 2
         except FileNotFoundError as exc:
             print(f"lpc_view: not found: {exc}", file=sys.stderr or sys.stdout)
             return 2

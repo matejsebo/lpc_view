@@ -8,11 +8,14 @@ and statistics computed from the points themselves.
 
 ## Run
 
-Needs [uv](https://docs.astral.sh/uv/) and Python 3.13.
+Needs [uv](https://docs.astral.sh/uv/) and Python 3.12 or newer.
 
 ```bash
-uv sync
+uv sync --extra app
 ```
+
+(`uv sync` alone leaves out pywebview, the `app` extra: enough for `serve` and
+`info`, and for the tests, which skip the window's.)
 
 ```bash
 uv run lpc_view app path/to/tile.laz
