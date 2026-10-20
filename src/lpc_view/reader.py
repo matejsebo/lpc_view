@@ -812,10 +812,15 @@ STREAM_FIELDS = (
 SAMPLE_PER_CLOUD = 1_000_000  # points per file behind the merged percentiles
 
 
+RGB_CHANNELS = ("red", "green", "blue")
+
+
 def _raw(cloud: PointCloud, name: str) -> tuple[np.ndarray, float, float] | None:
     """The stored array behind a ranged statistic and the scale and offset to apply."""
     if name == "z":
         return cloud.Z, float(cloud.scale[2]), float(cloud.offset[2])
+    if name in RGB_CHANNELS:
+        return None if cloud.rgb is None else (cloud.rgb[:, RGB_CHANNELS.index(name)], 1.0, 0.0)
     arr = getattr(cloud, name)
     return None if arr is None else (arr, 1.0, 0.0)
 
@@ -909,12 +914,18 @@ class CloudSet:
         out["density_per_m2"] = float(n / area) if area > 0 else None
         out["density_note"] = "over the bounding box of all files"
 
-        def merged_ranged(name: str, key: str, bins: int, percentiles=(1, 5, 50, 95, 99)) -> dict[str, Any] | None:
-            """The files' `key` statistics as one: exact moments and histogram, sampled percentiles."""
+        def merged_ranged(name: str, key: str, bins: int | None, percentiles=(1, 5, 50, 95, 99)) -> dict[str, Any] | None:
+            """The files' `key` statistics (a dotted path into stats()) as one: exact
+            moments, an exact histogram when `bins` is given, sampled percentiles."""
             have = [(c, _raw(c, name)) for c in clouds if _raw(c, name) is not None]
             if not have:
                 return None
-            per = [c.stats()[key] for c, _ in have]
+            per = []
+            for c, _ in have:
+                st: Any = c.stats()
+                for part in key.split("."):
+                    st = st[part]
+                per.append(st)
             lo = min(s["min"] for s in per)
             hi = max(s["max"] for s in per)
             counts = np.array([c.count for c, _ in have], dtype=np.float64)
@@ -922,20 +933,23 @@ class CloudSet:
             stds = np.array([s["std"] for s in per])
             mean = float((counts * means).sum() / counts.sum())
             var = float((counts * (stds**2 + (means - mean) ** 2)).sum() / counts.sum())
-            edges = _edges(lo, hi, bins)
-            hist = np.zeros(bins, dtype=np.int64)
+            edges = _edges(lo, hi, bins) if bins else None
+            hist = np.zeros(bins or 0, dtype=np.int64)
             samples = []
             for c, (arr, scale, offset) in have:
-                hist += _histogram(arr, edges, scale, offset)
+                if edges is not None:
+                    hist += _histogram(arr, edges, scale, offset)
                 idx = c.order[: min(c.count, SAMPLE_PER_CLOUD)]
                 samples.append(arr[idx].astype(np.float64) * scale + offset)
             q = np.percentile(np.concatenate(samples), percentiles)
-            return {
+            out = {
                 "min": lo, "max": hi, "mean": mean, "std": math.sqrt(var),
                 "percentiles": {str(p): float(x) for p, x in zip(percentiles, q, strict=True)},
                 "percentiles_note": f"from a sample of up to {SAMPLE_PER_CLOUD} points per file",
-                "histogram": {"edges": edges.tolist(), "counts": hist.tolist()},
             }
+            if edges is not None:
+                out["histogram"] = {"edges": edges.tolist(), "counts": hist.tolist()}
+            return out
 
         out["z"] = merged_ranged("z", "z", 64)
         out["intensity"] = merged_ranged("intensity", "intensity", 64)
@@ -984,11 +998,12 @@ class CloudSet:
             }
         coloured = [c for c in clouds if c.rgb is not None]
         if coloured:
-            out["rgb"] = {}
-            for k, name in enumerate(("red", "green", "blue")):
-                vals = [c.rgb[:, k] for c in coloured]
-                out["rgb"][name] = {
-                    "min": min(int(v.min()) for v in vals), "max": max(int(v.max()) for v in vals),
-                    "mean": float(np.mean([float(v.mean()) for v in vals])), "std": 0.0, "percentiles": {},
-                }
+            out["rgb"] = {
+                name: merged_ranged(name, f"rgb.{name}", None, percentiles=(1, 50, 99)) for name in RGB_CHANNELS
+            }
+            notes = sorted({c.rgb_note for c in coloured if c.rgb_note})
+            if notes:
+                out["rgb_note"] = " / ".join(notes)
+            if len(coloured) < len(clouds):
+                out["rgb_files"] = [i for i, c in zip(self.ids, self.clouds, strict=True) if c.rgb is not None]
         return out
