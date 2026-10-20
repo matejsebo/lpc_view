@@ -39,6 +39,8 @@ def test_metadata_is_complete_and_json_safe(sample_las):
     assert h["version"] == "1.4"
     assert h["point_count"] == N_POINTS
     assert h["point_data_record_format"] == 6
+    assert h["header_size"] == 375  # LAS 1.4's public header, as bytes 94-95 of the file say
+    assert h["offset_to_point_data"] > 375 + len(meta["vlrs"]) * 54
     assert h["scales"] == [0.01, 0.01, 0.01]
     assert h["offsets"][0] == 600000.0
     assert h["global_encoding"]["gps_time_type"] == "standard"

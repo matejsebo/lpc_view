@@ -257,6 +257,10 @@ def read_metadata(path: str | os.PathLike[str]) -> dict[str, Any]:
     """Everything the file says about itself, without decoding any points."""
     path = Path(path)
     st = path.stat()
+    with open(path, "rb") as f:
+        head = f.read(96)
+    # The public header's own size field (bytes 94-95), as the file states it.
+    header_size = struct.unpack_from("<H", head, 94)[0] if len(head) >= 96 else None
     with laspy.open(path) as reader:
         h = reader.header
         evlrs = list(reader.evlrs or [])
@@ -301,9 +305,7 @@ def read_metadata(path: str | os.PathLike[str]) -> dict[str, Any]:
             "system_identifier": h.system_identifier,
             "generating_software": h.generating_software,
             "creation_date": h.creation_date.isoformat() if h.creation_date else None,
-            "header_size": int(h.offset_to_point_data) - len(h.extra_header_bytes or b"")
-            - sum(54 + len(v.record_data_bytes()) for v in h.vlrs)
-            - len(h.extra_vlr_bytes or b""),
+            "header_size": header_size,
             "offset_to_point_data": int(h.offset_to_point_data),
             "number_of_vlrs": len(h.vlrs),
             "point_data_record_format": int(pf.id),
