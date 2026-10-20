@@ -3,6 +3,7 @@ import socket
 import struct
 import threading
 import urllib.request
+from pathlib import Path
 
 import pytest
 
@@ -248,3 +249,33 @@ def test_every_response_carries_the_safety_headers(server):
         status, _, headers = get_with_headers(server + path, token=token)
         assert headers["Referrer-Policy"] == "no-referrer", (path, status)
         assert headers["X-Content-Type-Options"] == "nosniff", (path, status)
+
+
+def test_listing_reads_each_header_once_until_the_file_changes(sample_las, sample_laz, tmp_path, monkeypatch):
+    import os
+
+    import laspy
+
+    from lpc_view.server import Catalog
+
+    opened = []
+    real_open = laspy.open
+    monkeypatch.setattr(laspy, "open", lambda p, *a, **k: opened.append(Path(p).name) or real_open(p, *a, **k))
+    cat = Catalog([sample_las, sample_laz])
+    first = cat.listing()
+    assert opened == ["sample.las", "sample.laz"]
+    assert cat.listing() == first and opened == ["sample.las", "sample.laz"]  # cached
+    cat.cloud(1)  # decoding opens the file too, once
+    assert cat.listing()[1]["loaded"] is True  # but `loaded` is live
+    assert opened == ["sample.las", "sample.laz", "sample.laz"]
+    opened.clear()
+    # A changed file (newer mtime) is read again; an added file is read on its first listing.
+    copy = tmp_path / "c.las"
+    copy.write_bytes(sample_las.read_bytes())
+    assert cat.add_files([copy]) == [2]
+    st = sample_laz.stat()
+    os.utime(sample_laz, ns=(st.st_atime_ns, st.st_mtime_ns + 2_000_000_000))
+    rows = cat.listing()
+    assert [r["name"] for r in rows] == ["sample.las", "sample.laz", "c.las"] and rows[2]["point_count"] == N_POINTS
+    assert opened == ["sample.laz", "c.las"]
+    assert cat.listing() == rows and len(opened) == 2

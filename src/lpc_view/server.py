@@ -86,6 +86,7 @@ class Catalog:
         self._clouds: dict[int, PointCloud] = {}
         self._sets: dict[tuple[int, ...], CloudSet] = {}
         self._meta: dict[int, dict[str, Any]] = {}
+        self._rows: dict[int, tuple[tuple[str, int, int], dict[str, Any]]] = {}  # listing rows by (path, mtime, size)
         self._locks = [threading.Lock() for _ in files]
         self._recent: list[int] = []
         self._transformers: dict[int, Any] = {}
@@ -108,6 +109,7 @@ class Catalog:
                 self.files.append(p)
                 self._locks.append(threading.Lock())
                 new_ids.append(len(self.files) - 1)
+                self._rows.pop(new_ids[-1], None)
         return new_ids
 
     def ids_of(self, paths: list[str | Path]) -> list[int]:
@@ -116,27 +118,39 @@ class Catalog:
         return [i for i, p in enumerate(self.files) if p.resolve() in wanted]
 
     def listing(self) -> list[dict[str, Any]]:
+        """One row per file. The header is read once per (path, mtime, size); only
+        `loaded` is fresh on every call."""
         rows = []
         for i, p in enumerate(self.files):
             try:
-                with laspy.open(p) as r:
-                    count = int(r.header.point_count)
-                    pf = int(r.header.point_format.id)
-                    version = str(r.header.version)
-            except Exception as exc:  # noqa: BLE001
-                count, pf, version = -1, -1, f"error: {exc}"
-            rows.append(
-                {
+                st = p.stat()
+                key = (str(p), st.st_mtime_ns, st.st_size)
+            except OSError as exc:
+                key = (str(p), -1, -1)
+                st = None
+            cached = self._rows.get(i)
+            if cached is None or cached[0] != key:
+                if st is None:
+                    count, pf, version = -1, -1, f"error: {exc}"
+                else:
+                    try:
+                        with laspy.open(p) as r:
+                            count = int(r.header.point_count)
+                            pf = int(r.header.point_format.id)
+                            version = str(r.header.version)
+                    except Exception as exc:  # noqa: BLE001
+                        count, pf, version = -1, -1, f"error: {exc}"
+                row = {
                     "id": i,
                     "name": p.name,
                     "path": str(p),
-                    "size_bytes": p.stat().st_size,
+                    "size_bytes": st.st_size if st else -1,
                     "point_count": count,
                     "point_format": pf,
                     "version": version,
-                    "loaded": i in self._clouds,
                 }
-            )
+                self._rows[i] = cached = (key, row)
+            rows.append({**cached[1], "loaded": i in self._clouds})
         return rows
 
     def meta(self, i: int) -> dict[str, Any]:
