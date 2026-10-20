@@ -769,7 +769,7 @@ async function startLoad(ids) {
       if (!r.ok) throw new Error(`chunk ${start}: HTTP ${r.status}`);
       const buf = await r.arrayBuffer();
       if (ctl.signal.aborted) return;
-      ingest(buf, start);
+      ingest(buf);
       setProgress(cloud.loaded / cloud.budget);
       setStatus(`${fmtInt(cloud.loaded)} of ${fmtInt(cloud.budget)} points loaded`);
     }
@@ -829,7 +829,12 @@ function allocate(n, stats) {
   if (!hasColour && ui.mode.value === "8") { ui.mode.value = "0"; uniforms.uMode.value = 0; }
 }
 
-function ingest(buf, start) {
+// Append a chunk after the points already loaded. A chunk asked for as stream
+// positions [s, s+count) holds the mosaic's points at those positions, which is
+// count points give or take one per file (each file contributes floor(p * n_k / N)
+// points below position p), so chunks are placed by their actual counts, not by s.
+function ingest(buf) {
+  const start = cloud.loaded;
   const dv = new DataView(buf);
   const magic = String.fromCharCode(dv.getUint8(0), dv.getUint8(1), dv.getUint8(2), dv.getUint8(3));
   if (magic !== "LPC2") throw new Error("bad chunk");
