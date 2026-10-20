@@ -34,6 +34,7 @@ const ui = {
   hudPos: $("hud-pos"),
   hudLook: $("hud-look"),
   hudPts: $("hud-pts"),
+  hudDraw: $("hud-draw"),
   hudFps: $("hud-fps"),
   crosshair: $("crosshair"),
 };
@@ -114,6 +115,7 @@ uniform float uHideOverlap;
 uniform float uHideSynthetic;
 uniform sampler2D uClassTex;
 uniform float uPickSize;
+uniform float uMaxSize;
 
 bool hiddenPoint() {
   vec4 cls = texture(uClassTex, vec2((classification + 0.5) / 256.0, 0.5));
@@ -129,7 +131,9 @@ float pointSizeFor(vec4 mv, float base) {
   float s = base;
   if (uAdaptive > 0.5) {
     float d = max(-mv.z, 0.5);
-    s = base * clamp(60.0 / d, 0.6, 3.0);
+    // Bigger when near, but never past uMaxSize pixels (unless the base size already
+    // is): the fragment cost of the points next to the camera stays bounded.
+    s = min(base * clamp(60.0 / d, 0.6, 3.0), max(base, uMaxSize));
   }
   return s;
 }
@@ -232,6 +236,7 @@ const uniforms = {
   uHideSynthetic: { value: 0 },
   uClassTex: { value: classTex },
   uPickSize: { value: 7 },
+  uMaxSize: { value: 8 },
 };
 
 const material = new THREE.ShaderMaterial({
@@ -290,6 +295,7 @@ function resize() {
   renderer.setSize(w, h, false);
   camera.aspect = w / h;
   camera.updateProjectionMatrix();
+  uniforms.uMaxSize.value = 8 * renderer.getPixelRatio();
 }
 window.addEventListener("resize", resize);
 resize();
@@ -441,12 +447,53 @@ function stepCamera(dt) {
 // Render loop
 // ---------------------------------------------------------------------------
 
+// Level of detail: the fraction of the loaded points drawn. The stream is a uniform
+// shuffle, so the first k points are a uniform sample of the loaded ones. While the
+// camera moves, every frame over the target cuts the fraction and every frame well
+// under it raises it a little; once the camera has been still for a moment the
+// fraction climbs back to all the points, a quarter more each frame.
+const TARGET_MS = 16;
+const lod = { fraction: 1, movingFraction: 1, moving: false, stillSince: 0, drawn: 0 };
+const prevPose = { x: NaN, y: NaN, z: NaN, yaw: NaN, pitch: NaN };
+
+function cameraMoved() {
+  const p = cam.pos;
+  const moved = p.x !== prevPose.x || p.y !== prevPose.y || p.z !== prevPose.z || cam.yaw !== prevPose.yaw || cam.pitch !== prevPose.pitch;
+  prevPose.x = p.x; prevPose.y = p.y; prevPose.z = p.z; prevPose.yaw = cam.yaw; prevPose.pitch = cam.pitch;
+  return moved;
+}
+
+function updateLod(now, frameMs) {
+  if (cameraMoved()) lod.stillSince = now;
+  const wasMoving = lod.moving;
+  lod.moving = now - lod.stillSince < 150;
+  if (lod.moving) {
+    // Start a move at the fraction the last move settled at, not at the still camera's all.
+    if (!wasMoving) lod.fraction = Math.min(lod.fraction, lod.movingFraction);
+    if (frameMs > TARGET_MS * 1.2) lod.fraction *= Math.max(0.5, (0.9 * TARGET_MS) / frameMs);
+    else if (frameMs < TARGET_MS * 0.7) lod.fraction *= 1.05;
+    lod.fraction = Math.min(1, Math.max(0.005, lod.fraction));
+    lod.movingFraction = lod.fraction;
+  } else if (lod.fraction < 1) {
+    lod.fraction = Math.min(1, lod.fraction * 1.25);
+  }
+}
+
+function applyLod() {
+  if (!geometry) { lod.drawn = 0; return; }
+  lod.drawn = lod.fraction >= 1 ? cloud.loaded : Math.floor(cloud.loaded * lod.fraction);
+  geometry.setDrawRange(0, lod.drawn);
+}
+
 let lastT = performance.now(), frames = 0, fpsT = lastT;
 function frame(now) {
-  const dt = Math.min(0.1, (now - lastT) / 1000);
+  const frameMs = now - lastT;
+  const dt = Math.min(0.1, frameMs / 1000);
   lastT = now;
   stepCamera(dt);
   applyCamera();
+  updateLod(now, frameMs);
+  applyLod();
   renderer.render(scene, camera);
   frames++;
   if (now - fpsT > 500) {
@@ -462,6 +509,8 @@ function updateHud() {
   const hd = ((cam.yaw * 180) / Math.PI) % 360;
   ui.hudLook.textContent = `hdg ${fmt((hd + 360) % 360, 0)}  pitch ${fmt((cam.pitch * 180) / Math.PI, 0)}  ${cam.speed.toFixed(cam.speed >= 10 ? 0 : 1)} m/s`;
   ui.hudPts.textContent = cloud.count ? `${fmtInt(cloud.loaded)} / ${fmtInt(cloud.count)} pts` : "-";
+  const f = cloud.loaded ? lod.drawn / cloud.loaded : 0;
+  ui.hudDraw.textContent = !cloud.loaded ? "-" : lod.drawn >= cloud.loaded ? "all drawn" : `${fmtInt(lod.drawn)} drawn (${(100 * f).toFixed(f < 0.1 ? 1 : 0)}%)`;
 }
 requestAnimationFrame(frame);
 
@@ -885,7 +934,6 @@ function ingest(buf) {
     attr.needsUpdate = true;
   }
   cloud.loaded = start + n;
-  geometry.setDrawRange(0, cloud.loaded);
 }
 
 // ---------------------------------------------------------------------------
@@ -1008,4 +1056,4 @@ function renderStats(s) {
 loadFiles().catch((err) => setStatus(`could not list files: ${err.message}`));
 
 // A handle for debugging from the console.
-window.lpcview = { pickAt, cloud, cam, uniforms, fitView, topView, eyeLevel, startLoad, pickBuffer, get points() { return points; }, renderer, scene, camera };
+window.lpcview = { pickAt, cloud, cam, lod, uniforms, fitView, topView, eyeLevel, startLoad, pickBuffer, get points() { return points; }, renderer, scene, camera };
