@@ -7,9 +7,11 @@ Routes:
   GET /api/meta?file=<id>       header, VLRs, EVLRs, CRS (no point decoding)
   GET /api/load?files=<id,id,..>
                                 decode those files (once each); returns the merged
-                                statistics, point count and centre
+                                statistics, point count and centre. At most
+                                --max-loaded files in one set (400 above it).
   GET /api/points?files=<id,..>&start=<n>&count=<n>
-                                a binary chunk of the merged stream (reader.CloudSet)
+                                a binary chunk of the merged stream (reader.CloudSet);
+                                count at most MAX_POINTS_PER_REQUEST (400 above it)
   GET /api/point?file=<id>&i=<index in that file's shuffled order>
                                 every attribute of one point, exact, with lat/lon
   GET /api/sha256?file=<id>     the file's SHA-256 (slow on big files)
@@ -45,6 +47,7 @@ STATIC_DIR = Path(__file__).parent / "static"
 LAS_SUFFIXES = {".las", ".laz"}
 LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
 TOKEN_HEADER = "X-Lpc-Token"
+MAX_POINTS_PER_REQUEST = 2_000_000  # one /api/points chunk; the page asks for 500,000
 
 
 def find_files(paths: list[str | Path]) -> list[Path]:
@@ -69,7 +72,13 @@ def find_files(paths: list[str | Path]) -> list[Path]:
 
 
 class Catalog:
-    """The files on offer and the clouds decoded so far, with one lock per file."""
+    """The files on offer and the clouds decoded so far, with one lock per file.
+
+    At most `max_loaded` clouds stay decoded; past that the least recently used
+    goes, and any cached CloudSet that held it goes with it (the set is rebuilt,
+    and the cloud decoded again, on its next use). A set never has more than
+    `max_loaded` files, so building one cannot evict its own clouds.
+    """
 
     def __init__(self, files: list[Path], max_loaded: int = 64) -> None:
         self.files = files
@@ -135,7 +144,8 @@ class Catalog:
             self._meta[i] = read_metadata(self.files[i])
         return self._meta[i]
 
-    def cloud(self, i: int) -> PointCloud:
+    def cloud(self, i: int, keep: tuple[int, ...] = ()) -> PointCloud:
+        """The decoded cloud `i`; `keep` names clouds that must not be evicted to make room."""
         with self._locks[i]:
             if i not in self._clouds:
                 t0 = time.perf_counter()
@@ -146,15 +156,15 @@ class Catalog:
                     f"[lpc_view] decoded {self.files[i].name}: {cloud.count} points"
                     f" in {time.perf_counter() - t0:.1f} s"
                 )
-                self._evict(keep=i)
+                self._evict(keep={i, *keep})
         if i in self._recent:
             self._recent.remove(i)
         self._recent.append(i)
         return self._clouds[i]
 
-    def _evict(self, keep: int) -> None:
+    def _evict(self, keep: set[int]) -> None:
         while len(self._clouds) > self.max_loaded:
-            victim = next((k for k in self._recent if k != keep and k in self._clouds), None)
+            victim = next((k for k in self._recent if k not in keep and k in self._clouds), None)
             if victim is None:
                 break
             del self._clouds[victim]
@@ -165,9 +175,11 @@ class Catalog:
 
     def cloud_set(self, ids: list[int]) -> CloudSet:
         """The clouds of `ids` as one stream; decoded on first use, cached as a set."""
+        if len(ids) > self.max_loaded:
+            raise ValueError(f"{len(ids)} files in one set; at most {self.max_loaded} (--max-loaded) can be loaded at once")
         key = tuple(ids)
         if key not in self._sets:
-            clouds = [self.cloud(i) for i in ids]
+            clouds = [self.cloud(i, keep=key) for i in ids]
             cs = CloudSet(list(ids), clouds)
             cs.stats()
             self._sets[key] = cs
@@ -327,6 +339,10 @@ class Handler(SimpleHTTPRequestHandler):
             ids = self._file_ids(q)
             start = int(q.get("start", ["0"])[0])
             count = int(q.get("count", ["1000000"])[0])
+            if not 0 <= count <= MAX_POINTS_PER_REQUEST:
+                raise ValueError(f"count must be 0..{MAX_POINTS_PER_REQUEST}")
+            if start < 0:
+                raise ValueError("start must not be negative")
             self._send_bytes(cat.cloud_set(ids).pack_chunk(start, count))
         elif route == "point":
             i = self._file_id(q)

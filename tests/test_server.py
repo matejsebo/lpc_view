@@ -169,6 +169,10 @@ def test_meta_load_points_point(server):
 def test_errors_are_json(server):
     status, body, _ = get(server + "/api/meta?file=9")
     assert status == 400 and "error" in json.loads(body)
+    status, body, _ = get(server + "/api/points?file=0&start=0&count=2000001")
+    assert status == 400 and "count" in json.loads(body)["error"]
+    assert get(server + "/api/points?file=0&start=0&count=2000000")[0] == 200
+    assert get(server + "/api/points?file=0&start=-1&count=10")[0] == 400
     status, body, _ = get(server + "/api/load?files=0,9")
     assert status == 400
     status, body, _ = get(server + "/api/load?files=")
@@ -179,3 +183,38 @@ def test_errors_are_json(server):
     assert status == 404 and "error" in json.loads(body)
     status, _, _ = get(server + "/nothing.html")
     assert status == 404
+
+
+def test_eviction_keeps_a_set_whole_and_drops_sets_with_their_clouds(sample_las, sample_laz, tmp_path):
+    from lpc_view.server import Catalog
+
+    (tmp_path / "c.las").write_bytes(sample_las.read_bytes())
+    cat = Catalog([sample_las, sample_laz, tmp_path / "c.las"], max_loaded=2)
+    # A set larger than max_loaded is refused (400 through the API) rather than evicting its own clouds.
+    with pytest.raises(ValueError):
+        cat.cloud_set([0, 1, 2])
+    pair = cat.cloud_set([1, 2])
+    assert set(cat._clouds) == {1, 2} and (1, 2) in cat._sets
+    # Loading a third cloud evicts the least recently used one, and the set that held it.
+    cat.cloud(1)  # 1 is now more recent than 2
+    cat.cloud(0)
+    assert set(cat._clouds) == {0, 1} and (1, 2) not in cat._sets
+    # The set comes back on its next use, with its missing cloud decoded again.
+    again = cat.cloud_set([1, 2])
+    assert again is not pair and again.count == pair.count
+    assert set(cat._clouds) == {1, 2}  # 0 went to make room for 2, not 1: the set's own clouds are kept
+    assert cat.cloud_set([1, 2]) is again
+
+
+def test_load_refuses_more_files_than_max_loaded(sample_las, sample_laz):
+    srv = make_server([sample_las, sample_laz], port=0, token=TOKEN, max_loaded=1)
+    thread = threading.Thread(target=srv.serve_forever, daemon=True)
+    thread.start()
+    try:
+        url = srv.base_url.rstrip("/")
+        status, body, _ = get(url + "/api/load?files=0,1")
+        assert status == 400 and "max-loaded" in json.loads(body)["error"]
+        assert get(url + "/api/load?files=1")[0] == 200
+    finally:
+        srv.shutdown()
+        srv.server_close()
