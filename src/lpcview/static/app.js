@@ -695,7 +695,7 @@ async function openFiles() {
   try {
     const r = await window.pywebview.api.open_files();
     if (r.error) { setStatus(r.error); return; }
-    if (r.cancelled) return;
+    if (r.cancelled) { if (!files.length) setStatus("no files open; Open... (or O) to pick some"); return; }
     await loadFiles(r.selected);
     if (r.added.length) setStatus(`${r.added.length} file(s) opened; press Load`);
   } catch (err) {

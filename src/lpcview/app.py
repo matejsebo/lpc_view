@@ -17,7 +17,8 @@ from typing import Any
 from .server import LpcServer, find_files, make_server, start_in_thread
 
 TITLE = "lpcview"
-FILE_TYPES = ("LAS/LAZ point clouds (*.las;*.laz)", "All files (*.*)")
+# pywebview's filter grammar: a description of word characters and spaces, then (*.ext;*.ext).
+FILE_TYPES = ("LAS and LAZ point clouds (*.las;*.laz)", "All files (*.*)")
 
 ChooseFiles = Callable[[], Sequence[str] | None]
 

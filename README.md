@@ -1,7 +1,7 @@
 # lpcview
 
-View, inspect and fly through LAS/LAZ lidar point clouds in a browser, from a
-small local Python server. It shows every piece of metadata a file carries: the
+View, inspect and fly through LAS/LAZ lidar point clouds, in a window of its own
+or in a browser, from a small local Python server. It shows every piece of metadata a file carries: the
 public header, the global encoding bits, the point format's dimensions, each VLR
 and EVLR (parsed where known, raw bytes always), the coordinate reference system,
 and statistics computed from the points themselves.
@@ -15,12 +15,24 @@ uv sync
 ```
 
 ```bash
+uv run lpcview app path/to/tile.laz
+```
+
+opens the viewer in a window of its own (maximised, titled lpcview), on a free
+local port. With no files it asks for some with the native file dialog;
+**Open...** in the Files section (or `O`) adds more while it runs. Closing the
+window stops the server. On Windows the window is a WebView2 (Edge) view; see
+[Building the exe](#building-the-exe) for the runtime it needs.
+
+In a browser instead:
+
+```bash
 uv run lpcview serve path/to/tile.laz
 ```
 
 Then open <http://127.0.0.1:8765/>. Several files, or a directory of them, can be
-given; the page has a file picker. `--open` opens the page for you, `--port`
-changes the port.
+given to either command; the page has a file picker. `--open` opens the page for
+you, `--port` changes the port.
 
 A quick look without the browser:
 
@@ -58,12 +70,41 @@ uv run lpcview info path/to/tile.laz --stats
   ids, flags), and the header, VLRs and CRS of the file chosen at the top of the
   panel. The metadata is also served as JSON at `/api/meta?file=0`.
 
+## Building the exe
+
+One file, `dist/lpcview.exe`, with the page, the vendored three.js and the
+Python side inside; no console. It is built with PyInstaller (a dev dependency):
+
+```bash
+uv run python tools/build_exe.py
+```
+
+Double-click it, drop files on it, or set it as the "Open with" program for
+`.laz` and `.las`: an argument that is a path means `app`. From a console it
+takes the same commands as `lpcview`, but being a windowed build it prints
+nothing, so use the uv install for `serve` and `info`. `--console` builds a
+console variant that does print; `--keep-build` keeps PyInstaller's work
+directory for a look at what was collected.
+
+The window needs the **WebView2 runtime** (the Edge engine pywebview uses on
+Windows). Windows 11 has it, and so does any Windows 10 with Microsoft Edge or
+Office installed. Without it the exe shows a message instead of the page;
+install the Evergreen runtime from
+<https://developer.microsoft.com/microsoft-edge/webview2/> (the Evergreen
+Bootstrapper is a 2 MB download that installs the current version). Nothing else
+is needed: Python, laspy, numpy and pyproj are in the exe.
+
 ## Layout
 
 - `src/lpcview/reader.py`: metadata extraction, point decoding, statistics, and
   the binary chunk format the viewer streams.
 - `src/lpcview/server.py`: the HTTP server and its API (documented at the top of
   the file).
+- `src/lpcview/app.py`: `lpcview app`, the pywebview window around the server,
+  and the `Api` the page calls for the file dialog.
+- `src/lpcview/cli.py`: the `lpcview` command (`app`, `serve`, `info`);
+  `__main__.py` runs it for `python -m lpcview` and the exe.
+- `tools/build_exe.py`: the PyInstaller build.
 - `src/lpcview/classes.py`: the ASPRS class table and colours.
 - `src/lpcview/static/`: the page, its style, `app.js` (three.js scene, fly
   camera, GPU picking, panels) and the vendored three.js r180 (MIT).

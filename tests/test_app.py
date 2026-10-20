@@ -27,6 +27,17 @@ def test_api_open_files(sample_las, sample_laz, tmp_path):
         srv.server_close()
 
 
+def test_file_types_parse():
+    from webview.util import parse_file_type
+
+    from lpcview.app import FILE_TYPES
+
+    assert [parse_file_type(f) for f in FILE_TYPES] == [
+        ("LAS and LAZ point clouds", "*.las;*.laz"),
+        ("All files", "*.*"),
+    ]
+
+
 def test_normalise_argv(sample_las, tmp_path):
     assert normalise_argv([]) == []
     assert normalise_argv([], frozen=True) == ["app"]
