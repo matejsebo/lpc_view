@@ -385,6 +385,7 @@ class PointCloud:
     rgb: np.ndarray | None  # uint8 N x 3 or None
     nir: np.ndarray | None
     gps_time_type: str
+    rgb_note: str | None = None  # how the file's colour fields were read, see load_cloud
     class_lookup: dict[int, str] = field(default_factory=dict)
     order: np.ndarray = field(default=None)  # type: ignore[assignment]
     _stats: dict[str, Any] | None = field(default=None, repr=False)
@@ -563,6 +564,8 @@ class PointCloud:
                 c: _ranged(self.rgb[:, k], percentiles=(1, 50, 99))
                 for k, c in enumerate(("red", "green", "blue"))
             }
+            if self.rgb_note:
+                out["rgb_note"] = self.rgb_note
         if self.nir is not None:
             out["nir"] = _ranged(self.nir, percentiles=(1, 50, 99))
         return out
@@ -751,9 +754,12 @@ def load_cloud(path: str | os.PathLike[str], max_points: int | None = None) -> P
         nir = nir[:n].copy() if nir is not None else None
 
     rgb = None
+    rgb_note = None
     if rgb16 is not None:
-        # 16-bit colour when any channel exceeds 255, else already 8-bit.
+        # The LAS colour fields are 16-bit; some writers put 8-bit values in them.
+        # 16-bit colour when any channel exceeds 255 (scaled down), else kept as is.
         shift = 8 if (n and int(rgb16.max()) > 255) else 0
+        rgb_note = "16-bit colours scaled to 8-bit" if shift else "colours are 8-bit in 16-bit fields"
         rgb = np.empty((n, 3), dtype=np.uint8)
         for k in range(3):
             rgb[:, k] = rgb16[:, k] >> shift
@@ -790,6 +796,7 @@ def load_cloud(path: str | os.PathLike[str], max_points: int | None = None) -> P
         rgb=rgb,
         nir=nir,
         gps_time_type=gps_type,
+        rgb_note=rgb_note,
         class_lookup=lookup,
     )
 

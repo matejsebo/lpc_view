@@ -181,3 +181,16 @@ def test_block_statistics_match_numpy(monkeypatch):
     assert got["histogram"] == {"edges": edges.tolist(), "counts": counts.tolist()}
     codes, counts = reader._value_counts(rng.integers(0, 70000, 5000).astype(np.uint16))
     assert codes.size > 1000 and counts.sum() == 5000
+
+
+def test_rgb_8_or_16_bit_is_told_apart(tmp_path):
+    from tests.conftest import write_sample
+
+    wide = load_cloud(write_sample(tmp_path / "wide.las", point_format=7, rgb_scale=257))
+    narrow = load_cloud(write_sample(tmp_path / "narrow.las", point_format=7, rgb_scale=1))
+    assert wide.rgb.dtype == np.uint8 and np.array_equal(wide.rgb, narrow.rgb)  # the same colours either way
+    assert wide.stats()["rgb_note"] == "16-bit colours scaled to 8-bit"
+    assert narrow.stats()["rgb_note"] == "colours are 8-bit in 16-bit fields"
+    assert wide.stats()["rgb"]["red"]["max"] == 255.0
+    plain = load_cloud(write_sample(tmp_path / "plain.las", point_format=6))
+    assert plain.rgb is None and "rgb_note" not in plain.stats()

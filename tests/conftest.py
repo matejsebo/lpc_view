@@ -11,7 +11,8 @@ import pytest
 N_POINTS = 1000
 
 
-def write_sample(path: Path, compressed: bool = False, point_format: int = 6) -> Path:
+def write_sample(path: Path, compressed: bool = False, point_format: int = 6, rgb_scale: int = 257) -> Path:
+    """A 1000-point file; formats with colour get random 8-bit colours times `rgb_scale`."""
     header = laspy.LasHeader(point_format=point_format, version="1.4")
     header.offsets = np.array([600000.0, 4180000.0, 0.0])
     header.scales = np.array([0.01, 0.01, 0.01])
@@ -43,6 +44,9 @@ def write_sample(path: Path, compressed: bool = False, point_format: int = 6) ->
     withheld = np.zeros(n, dtype=bool)
     withheld[:7] = True
     las.withheld = withheld
+    if "red" in las.point_format.dimension_names:
+        for channel in ("red", "green", "blue"):
+            las[channel] = (rng.integers(0, 256, n) * rgb_scale).astype(np.uint16)
     las.write(path)
     return path
 
