@@ -123,13 +123,22 @@ is needed: Python, laspy, numpy and pyproj are in the exe.
   `__main__.py` runs it for `python -m lpc_view` and the exe.
 - `tools/build_exe.py`: the PyInstaller build.
 - `src/lpc_view/classes.py`: the ASPRS class table and colours.
-- `src/lpc_view/static/`: the page, its style, `app.js` (three.js scene, the
-  grid of cells and their level of detail, fly camera, GPU picking, panels) and
-  the vendored three.js r180 (MIT).
-- `tests/`: pytest, on a synthetic LAS/LAZ written with laspy.
+- `src/lpc_view/static/`: the page and its style, and the ES modules `app.js`
+  wires: `api.js` (token, fetch), `shaders.js` (GLSL, colour ramps, materials),
+  `cells.js` (the grid of cells, chunk ingest, level of detail, the point
+  budget cap), `camera.js` (fly controls and views), `picking.js` (GPU picks),
+  `panels.js` (the DOM: file list, class list, the five tabs), `classes.js`
+  (class colours, mirroring `classes.py`), `colormaps.js`, and the vendored
+  three.js r180 (MIT). Only `app.js` imports three.js; the other modules take
+  it as an argument, so their pure functions load in Node.
+- `tests/`: pytest, on a synthetic LAS/LAZ written with laspy; `tests/js/`: the
+  page's pure functions (chunk parsing, grid and pick-code maths, the level of
+  detail controller, the budget cap, the query split) under `node:test`, no
+  dependencies.
 
 ```bash
 uv run pytest
+npm test
 ```
 
 ## Notes
