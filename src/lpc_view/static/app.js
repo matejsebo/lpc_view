@@ -1,9 +1,10 @@
-// lpcview: the browser side. Streams a point cloud from the local server into a
+// lpc_view: the browser side. Streams a point cloud from the local server into a
 // grid of cells, draws them with a colour-mode shader at a level of detail set by
 // distance and frame time, flies a camera through them, picks points on the GPU
 // and shows the file's metadata.
 
 import * as THREE from "three";
+import { TURBO, VIRIDIS } from "./colormaps.js";
 
 // ---------------------------------------------------------------------------
 // DOM
@@ -40,6 +41,25 @@ const ui = {
   crosshair: $("crosshair"),
 };
 
+// The server's token: it arrives once in the URL lpc_view printed, is kept for the
+// tab, and goes with every API request; the URL is cleaned so it is not shared by
+// accident. A page without it gets 403 from the API and says so.
+const TOKEN = (() => {
+  const params = new URLSearchParams(location.search);
+  let t = params.get("token");
+  if (t) {
+    try { sessionStorage.setItem("lpcToken", t); } catch (e) { /* storage may be off */ }
+    params.delete("token");
+    const q = params.toString();
+    history.replaceState(null, "", location.pathname + (q ? `?${q}` : "") + location.hash);
+  } else {
+    try { t = sessionStorage.getItem("lpcToken"); } catch (e) { /* storage may be off */ }
+  }
+  return t || "";
+})();
+const apiFetch = (url, opts = {}) => fetch(url, { ...opts, headers: { ...(opts.headers || {}), "X-Lpc-Token": TOKEN } });
+const apiUrl = (url) => `${url}${url.includes("?") ? "&" : "?"}token=${encodeURIComponent(TOKEN)}`;
+
 const fmtInt = (n) => Number(n).toLocaleString("en-US");
 const fmt = (v, d = 2) => (v === null || v === undefined ? "-" : Number(v).toFixed(d));
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
@@ -49,28 +69,12 @@ const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&l
 // ---------------------------------------------------------------------------
 
 const COLOR_FUNCS = /* glsl */ `
+// uRampTex: row 0 turbo, row 1 viridis (static/colormaps.js has the tables and their licences).
 vec3 turbo(float x) {
-  x = clamp(x, 0.0, 1.0);
-  const vec4 kR4 = vec4(0.13572138, 4.61539260, -42.66032258, 132.13108234);
-  const vec2 kR2 = vec2(-152.94239396, 59.28637943);
-  const vec4 kG4 = vec4(0.09140261, 2.19418839, 4.84296658, -14.18503333);
-  const vec2 kG2 = vec2(4.27729857, 2.82956604);
-  const vec4 kB4 = vec4(0.10667330, 12.64194608, -60.58204836, 110.36276771);
-  const vec2 kB2 = vec2(-89.90310912, 27.34824973);
-  vec4 v4 = vec4(1.0, x, x * x, x * x * x);
-  vec2 v2 = v4.zw * v4.z;
-  return clamp(vec3(dot(v4, kR4) + dot(v2, kR2), dot(v4, kG4) + dot(v2, kG2), dot(v4, kB4) + dot(v2, kB2)), 0.0, 1.0);
+  return texture(uRampTex, vec2((clamp(x, 0.0, 1.0) * 255.0 + 0.5) / 256.0, 0.25)).rgb;
 }
 vec3 viridis(float t) {
-  t = clamp(t, 0.0, 1.0);
-  const vec3 c0 = vec3(0.2777273272234177, 0.005407344544966578, 0.3340998053353061);
-  const vec3 c1 = vec3(0.1050930431085774, 1.404613529898575, 1.384590162594685);
-  const vec3 c2 = vec3(-0.3308618287255563, 0.214847559468213, 0.09509516302823659);
-  const vec3 c3 = vec3(-4.634230498983486, -5.799100973351585, -19.33244095627987);
-  const vec3 c4 = vec3(6.228269936347081, 14.17993336680509, 56.69055260068105);
-  const vec3 c5 = vec3(4.776384997670288, -13.74514537774601, -65.35303263337234);
-  const vec3 c6 = vec3(-5.435455855934631, 4.645852612178535, 26.3124352495832);
-  return clamp(c0 + t * (c1 + t * (c2 + t * (c3 + t * (c4 + t * (c5 + t * c6))))), 0.0, 1.0);
+  return texture(uRampTex, vec2((clamp(t, 0.0, 1.0) * 255.0 + 0.5) / 256.0, 0.75)).rgb;
 }
 vec3 hsv2rgb(vec3 c) {
   vec4 K = vec4(1.0, 2.0 / 3.0, 1.0 / 3.0, 3.0);
@@ -119,6 +123,7 @@ uniform float uHideWithheld;
 uniform float uHideOverlap;
 uniform float uHideSynthetic;
 uniform sampler2D uClassTex;
+uniform sampler2D uRampTex;
 uniform float uPickSize;
 uniform float uMaxSize;
 uniform int uCellId;
@@ -226,6 +231,16 @@ camera.up.set(0, 0, 1);
 
 const classTexData = new Uint8Array(256 * 4);
 const classTex = new THREE.DataTexture(classTexData, 256, 1, THREE.RGBAFormat, THREE.UnsignedByteType);
+// The colour ramps: row 0 turbo, row 1 viridis, RGBA so that the rows are 4-byte aligned.
+const rampData = new Uint8Array(256 * 2 * 4);
+for (let i = 0; i < 256; i++) {
+  rampData.set([TURBO[3 * i], TURBO[3 * i + 1], TURBO[3 * i + 2], 255], 4 * i);
+  rampData.set([VIRIDIS[3 * i], VIRIDIS[3 * i + 1], VIRIDIS[3 * i + 2], 255], 4 * (256 + i));
+}
+const rampTex = new THREE.DataTexture(rampData, 256, 2, THREE.RGBAFormat, THREE.UnsignedByteType);
+rampTex.magFilter = THREE.LinearFilter;
+rampTex.minFilter = THREE.LinearFilter;
+rampTex.needsUpdate = true;
 classTex.magFilter = classTex.minFilter = THREE.NearestFilter;
 classTex.needsUpdate = true;
 
@@ -243,6 +258,7 @@ const uniforms = {
   uHideOverlap: { value: 0 },
   uHideSynthetic: { value: 0 },
   uClassTex: { value: classTex },
+  uRampTex: { value: rampTex },
   uPickSize: { value: 7 },
   uMaxSize: { value: 8 },
   uCellId: { value: 0 },
@@ -599,7 +615,7 @@ async function pickAt(cx, cy) {
   const seg = segmentOf(id);
   if (!seg) { showPoint(null); return; }
   try {
-    const r = await fetch(`/api/point?file=${seg.file}&i=${seg.local + (id - seg.start)}`);
+    const r = await apiFetch(`/api/point?file=${seg.file}&i=${seg.local + (id - seg.start)}`);
     const rec = await r.json();
     if (rec.error) throw new Error(rec.error);
     rec.file_id = seg.file;
@@ -647,7 +663,7 @@ function showPoint(rec) {
 }
 
 // ---------------------------------------------------------------------------
-// Class colours (mirrors lpcview/classes.py for codes the stats have not named)
+// Class colours (mirrors lpc_view/classes.py for codes the stats have not named)
 // ---------------------------------------------------------------------------
 
 const CLASS_COLORS = {};
@@ -750,7 +766,7 @@ function setProgress(frac) { ui.progress.style.width = `${Math.round(100 * frac)
 // ---------------------------------------------------------------------------
 
 async function fetchJson(url, signal) {
-  const r = await fetch(url, { signal });
+  const r = await apiFetch(url, { signal });
   const j = await r.json();
   if (j.error) throw new Error(j.error);
   return j;
@@ -779,7 +795,7 @@ async function loadFiles(select = null) {
   ui.fileList.querySelectorAll("input").forEach((cb) => cb.addEventListener("change", updateFilesCount));
   ui.metaFile.innerHTML = files.map((f) => `<option value="${f.id}">${esc(f.name)}</option>`).join("");
   updateFilesCount();
-  if (!files.length) { setStatus(window.pywebview ? "open a file (Open... or O)" : "no files; start lpcview with some"); return; }
+  if (!files.length) { setStatus(window.pywebview ? "open a file (Open... or O)" : "no files; start lpc_view with some"); return; }
   const first = (select || []).find((i) => files[i]) ?? selectedIds()[0] ?? 0;
   ui.metaFile.value = String(first);
   await showMetadata(first);
@@ -866,7 +882,7 @@ async function startLoad(ids) {
     const chunk = 500000;
     for (let start = 0; start < cloud.budget; start += chunk) {
       const n = Math.min(chunk, cloud.budget - start);
-      const r = await fetch(`/api/points?files=${filesParam}&start=${start}&count=${n}`, { signal: ctl.signal });
+      const r = await apiFetch(`/api/points?files=${filesParam}&start=${start}&count=${n}`, { signal: ctl.signal });
       if (!r.ok) throw new Error(`chunk ${start}: HTTP ${r.status}`);
       const buf = await r.arrayBuffer();
       if (ctl.signal.aborted) return;
@@ -1089,7 +1105,7 @@ function renderHeader(meta, fileId) {
     ["name", esc(f.name)], ["path", esc(f.path)], ["size", `${fmtInt(f.size_bytes)} bytes (${(f.size_bytes / 1048576).toFixed(1)} MB)`],
     ["modified", esc(f.modified)], ["compressed", f.compressed ? "yes (LAZ)" : "no (LAS)"],
     ["sha256", `<button class="mini" id="sha-btn">compute</button> <span id="sha-out"></span>`],
-    ["download", `<a href="/api/meta?file=${fileId}" download="${esc(f.name)}.meta.json">metadata JSON</a>`],
+    ["download", `<a href="${apiUrl(`/api/meta?file=${fileId}`)}" download="${esc(f.name)}.meta.json">metadata JSON</a>`],
   ]));
   html.push("<h4>Public header block</h4>", kvTable([
     ["version", h.version], ["file source id", h.file_source_id], ["project id (GUID)", h.project_id],
@@ -1194,4 +1210,4 @@ function renderStats(s) {
 loadFiles().catch((err) => setStatus(`could not list files: ${err.message}`));
 
 // A handle for debugging from the console.
-window.lpcview = { pickAt, cloud, cam, lod, uniforms, fitView, topView, eyeLevel, startLoad, pickBuffer, get cells() { return cellGroup; }, renderer, scene, camera };
+window.lpc_view = { pickAt, cloud, cam, lod, uniforms, fitView, topView, eyeLevel, startLoad, pickBuffer, get cells() { return cellGroup; }, renderer, scene, camera };

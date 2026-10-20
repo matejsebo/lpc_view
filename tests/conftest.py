@@ -15,7 +15,7 @@ def write_sample(path: Path, compressed: bool = False, point_format: int = 6) ->
     header = laspy.LasHeader(point_format=point_format, version="1.4")
     header.offsets = np.array([600000.0, 4180000.0, 0.0])
     header.scales = np.array([0.01, 0.01, 0.01])
-    header.system_identifier = "lpcview tests"
+    header.system_identifier = "lpc_view tests"
     header.generating_software = "laspy"
     header.global_encoding.gps_time_type = laspy.header.GpsTimeType.STANDARD
     header.add_crs(__import__("pyproj").CRS.from_epsg(6339))

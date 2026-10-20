@@ -129,7 +129,7 @@ wheels = [
 ]
 
 [[package]]
-name = "lpcview"
+name = "lpc-view"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [

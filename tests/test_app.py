@@ -1,8 +1,8 @@
-"""The window's Python side (lpcview.app) without a window: the Api and the argv rules."""
+"""The window's Python side (lpc_view.app) without a window: the Api and the argv rules."""
 
-from lpcview.app import Api
-from lpcview.cli import normalise_argv
-from lpcview.server import make_server
+from lpc_view.app import Api
+from lpc_view.cli import normalise_argv
+from lpc_view.server import make_server
 
 
 def test_api_open_files(sample_las, sample_laz, tmp_path):
@@ -30,7 +30,7 @@ def test_api_open_files(sample_las, sample_laz, tmp_path):
 def test_file_types_parse():
     from webview.util import parse_file_type
 
-    from lpcview.app import FILE_TYPES
+    from lpc_view.app import FILE_TYPES
 
     assert [parse_file_type(f) for f in FILE_TYPES] == [
         ("LAS and LAZ point clouds", "*.las;*.laz"),

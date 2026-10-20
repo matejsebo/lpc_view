@@ -1,5 +1,5 @@
 [project]
-name = "lpcview"
+name = "lpc_view"
 version = "0.1.0"
 description = "View, inspect and fly through LAS/LAZ lidar point clouds"
 readme = "README.md"
@@ -12,7 +12,7 @@ dependencies = [
 ]
 
 [project.scripts]
-lpcview = "lpcview.cli:main"
+lpc_view = "lpc_view.cli:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

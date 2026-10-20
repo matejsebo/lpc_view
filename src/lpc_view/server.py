@@ -13,12 +13,20 @@ Routes:
   GET /api/point?file=<id>&i=<index in that file's shuffled order>
                                 every attribute of one point, exact, with lat/lon
   GET /api/sha256?file=<id>     the file's SHA-256 (slow on big files)
+
+The server is a local tool, not a host: it binds only to a loopback address, it
+answers only requests whose Host header is one (so a web page cannot reach it
+through DNS rebinding), and every /api/ request must carry the token the server
+made at start (`X-Lpc-Token` header, or `token=` in the query), which only the
+page opened from the printed URL knows. Other programs and users on the machine,
+and any page from the internet, get 403.
 """
 
 from __future__ import annotations
 
 import json
 import mimetypes
+import secrets
 import sys
 import threading
 import time
@@ -35,6 +43,8 @@ from .reader import CloudSet, PointCloud, file_sha256, load_cloud, read_metadata
 
 STATIC_DIR = Path(__file__).parent / "static"
 LAS_SUFFIXES = {".las", ".laz"}
+LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
+TOKEN_HEADER = "X-Lpc-Token"
 
 
 def find_files(paths: list[str | Path]) -> list[Path]:
@@ -133,7 +143,7 @@ class Catalog:
                 cloud.stats()
                 self._clouds[i] = cloud
                 print(
-                    f"[lpcview] decoded {self.files[i].name}: {cloud.count} points"
+                    f"[lpc_view] decoded {self.files[i].name}: {cloud.count} points"
                     f" in {time.perf_counter() - t0:.1f} s"
                 )
                 self._evict(keep=i)
@@ -151,7 +161,7 @@ class Catalog:
             self._recent.remove(victim)
             self._transformers.pop(victim, None)
             self._sets = {key: v for key, v in self._sets.items() if victim not in key}
-            print(f"[lpcview] released {self.files[victim].name}")
+            print(f"[lpc_view] released {self.files[victim].name}")
 
     def cloud_set(self, ids: list[int]) -> CloudSet:
         """The clouds of `ids` as one stream; decoded on first use, cached as a set."""
@@ -194,11 +204,27 @@ class Catalog:
 class Handler(SimpleHTTPRequestHandler):
     catalog: Catalog
     quiet: bool
+    token: str
 
-    def __init__(self, *args: Any, catalog: Catalog, quiet: bool = False, **kwargs: Any) -> None:
+    def __init__(self, *args: Any, catalog: Catalog, token: str, quiet: bool = False, **kwargs: Any) -> None:
         self.catalog = catalog
+        self.token = token
         self.quiet = quiet
         super().__init__(*args, directory=str(STATIC_DIR), **kwargs)
+
+    # -- who may ask ---------------------------------------------------------------
+
+    def _host_is_loopback(self) -> bool:
+        host = (self.headers.get("Host") or "").strip()
+        if host.startswith("["):  # [::1]:port
+            host = host[1:].split("]", 1)[0]
+        else:
+            host = host.rsplit(":", 1)[0] if host.count(":") == 1 else host
+        return host.lower() in LOOPBACK_HOSTS
+
+    def _authorised(self, q: dict[str, list[str]]) -> bool:
+        given = self.headers.get(TOKEN_HEADER) or (q.get("token") or [""])[0]
+        return bool(given) and secrets.compare_digest(given, self.token)
 
     def log_message(self, fmt: str, *args: Any) -> None:  # quieter console
         if self.quiet or sys.stderr is None:  # no console in the windowed build
@@ -253,6 +279,9 @@ class Handler(SimpleHTTPRequestHandler):
 
     def do_GET(self) -> None:  # noqa: N802 - http.server API
         parts = urlsplit(self.path)
+        if not self._host_is_loopback():
+            self._send_json({"error": "lpc_view answers only on this machine"}, HTTPStatus.FORBIDDEN)
+            return
         if parts.path == "/":
             self.path = "/index.html"
             return super().do_GET()
@@ -260,8 +289,13 @@ class Handler(SimpleHTTPRequestHandler):
             self.path = parts.path[len("/static") :]
             return super().do_GET()
         if parts.path.startswith("/api/"):
+            q = parse_qs(parts.query, keep_blank_values=True)
+            if not self._authorised(q):
+                self._send_json({"error": "missing or wrong token: open the page from the URL lpc_view printed"},
+                                HTTPStatus.FORBIDDEN)
+                return
             try:
-                self._api(parts.path[len("/api/") :], parse_qs(parts.query, keep_blank_values=True))
+                self._api(parts.path[len("/api/") :], q)
             except (IndexError, ValueError, KeyError) as exc:
                 self._send_json({"error": f"bad request: {exc}"}, HTTPStatus.BAD_REQUEST)
             except FileNotFoundError as exc:
@@ -310,41 +344,56 @@ class Handler(SimpleHTTPRequestHandler):
 
 
 class LpcServer(ThreadingHTTPServer):
-    """The HTTP server with its catalog attached, so callers can add files later."""
+    """The HTTP server with its catalog and token attached."""
 
     catalog: Catalog
+    token: str
 
     @property
-    def url(self) -> str:
+    def base_url(self) -> str:
         host, port = self.server_address[:2]
         return f"http://{host}:{port}/"
 
+    @property
+    def url(self) -> str:
+        """The page's URL with the token: the one to open, and the only one that works."""
+        return f"{self.base_url}?token={self.token}"
+
 
 def make_server(files: list[Path], host: str = "127.0.0.1", port: int = 8765, max_loaded: int = 64,
-                quiet: bool = False) -> LpcServer:
-    """Bind the server. `port=0` takes a free port; `server.server_address` has the one taken."""
+                quiet: bool = False, token: str | None = None) -> LpcServer:
+    """Bind the server on a loopback address. `port=0` takes a free port.
+
+    The token (a fresh random one unless given, as the tests do) must come with
+    every API request; `server.url` carries it for the page.
+    """
+    if host not in LOOPBACK_HOSTS:
+        raise ValueError(f"lpc_view serves only this machine; {host!r} is not a loopback address")
     mimetypes.add_type("application/javascript", ".js")
     catalog = Catalog(list(files), max_loaded=max_loaded)
-    handler = partial(Handler, catalog=catalog, quiet=quiet)
+    token = token or secrets.token_urlsafe(24)
+    handler = partial(Handler, catalog=catalog, token=token, quiet=quiet)
     server = LpcServer((host, port), handler)
     server.catalog = catalog
+    server.token = token
     server.daemon_threads = True
     return server
 
 
 def start_in_thread(server: LpcServer) -> threading.Thread:
     """Serve on a daemon thread; `server.shutdown()` stops it."""
-    thread = threading.Thread(target=server.serve_forever, name="lpcview-http", daemon=True)
+    thread = threading.Thread(target=server.serve_forever, name="lpc_view-http", daemon=True)
     thread.start()
     return thread
 
 
-def serve(files: list[Path], host: str = "127.0.0.1", port: int = 8765, open_browser: bool = False, max_loaded: int = 64) -> None:
-    server = make_server(files, host, port, max_loaded=max_loaded)
+def serve(files: list[Path], port: int = 8765, open_browser: bool = False, max_loaded: int = 64) -> None:
+    server = make_server(files, port=port, max_loaded=max_loaded)
     url = server.url
-    print(f"[lpcview] serving {len(files)} file(s) at {url}")
+    print(f"[lpc_view] serving {len(files)} file(s) at {url}")
+    print("[lpc_view] only this machine can reach it, and only through that URL (its token)")
     for p in files:
-        print(f"[lpcview]   {p}")
+        print(f"[lpc_view]   {p}")
     if open_browser:
         import webbrowser
 
@@ -352,6 +401,6 @@ def serve(files: list[Path], host: str = "127.0.0.1", port: int = 8765, open_bro
     try:
         server.serve_forever()
     except KeyboardInterrupt:
-        print("\n[lpcview] stopped")
+        print("\n[lpc_view] stopped")
     finally:
         server.server_close()

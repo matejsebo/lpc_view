@@ -4,7 +4,7 @@ import struct
 import numpy as np
 import pytest
 
-from lpcview.reader import CHUNK_MAGIC, CloudSet, load_cloud
+from lpc_view.reader import CHUNK_MAGIC, CloudSet, load_cloud
 from tests.conftest import N_POINTS
 
 

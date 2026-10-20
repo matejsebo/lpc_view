@@ -5,13 +5,16 @@ import urllib.request
 
 import pytest
 
-from lpcview.server import find_files, make_server
+from lpc_view.server import find_files, make_server
 from tests.conftest import N_POINTS
+
+
+TOKEN = "test-token"
 
 
 @pytest.fixture(scope="module")
 def server(sample_las, sample_laz):
-    srv = make_server([sample_las, sample_laz], port=0)
+    srv = make_server([sample_las, sample_laz], port=0, token=TOKEN)
     thread = threading.Thread(target=srv.serve_forever, daemon=True)
     thread.start()
     yield f"http://127.0.0.1:{srv.server_address[1]}"
@@ -19,12 +22,36 @@ def server(sample_las, sample_laz):
     srv.server_close()
 
 
-def get(url: str) -> tuple[int, bytes, str]:
+def get(url: str, token: str | None = TOKEN, host: str | None = None) -> tuple[int, bytes, str]:
+    headers = {}
+    if token:
+        headers["X-Lpc-Token"] = token
+    if host:
+        headers["Host"] = host
+    req = urllib.request.Request(url, headers=headers)
     try:
-        with urllib.request.urlopen(url) as r:
+        with urllib.request.urlopen(req) as r:
             return r.status, r.read(), r.headers.get("Content-Type", "")
     except urllib.error.HTTPError as e:
         return e.code, e.read(), e.headers.get("Content-Type", "")
+
+
+def test_only_this_machine_and_only_with_the_token(server):
+    # No token: the page still comes, the API does not.
+    assert get(server + "/", token=None)[0] == 200
+    status, body, _ = get(server + "/api/files", token=None)
+    assert status == 403 and "token" in json.loads(body)["error"]
+    assert get(server + "/api/files", token="wrong")[0] == 403
+    # The token may ride in the query (for download links).
+    assert get(server + f"/api/files?token={TOKEN}", token=None)[0] == 200
+    # A Host header that is not loopback (what DNS rebinding would send) is refused everywhere.
+    assert get(server + "/", host="evil.example:80")[0] == 403
+    assert get(server + "/api/files", host="evil.example")[0] == 403
+    assert get(server + "/api/files", host="localhost:1")[0] == 200
+    assert get(server + "/api/files", host="[::1]:1")[0] == 200
+    # Binding anywhere but loopback is refused.
+    with pytest.raises(ValueError):
+        make_server([], host="0.0.0.0", port=0)
 
 
 def test_find_files(sample_las, sample_laz, tmp_path):
@@ -43,7 +70,9 @@ def test_make_server_takes_a_free_port(sample_las):
     try:
         pa, pb = a.server_address[1], b.server_address[1]
         assert pa != 0 and pb != 0 and pa != pb
-        assert a.url == f"http://127.0.0.1:{pa}/"
+        assert a.base_url == f"http://127.0.0.1:{pa}/"
+        assert a.url == f"{a.base_url}?token={a.token}" and len(a.token) >= 24
+        assert a.token != b.token
         assert a.catalog.files == [sample_las]
     finally:
         a.server_close()
@@ -51,7 +80,7 @@ def test_make_server_takes_a_free_port(sample_las):
 
 
 def test_catalog_add_files(sample_las, sample_laz, tmp_path):
-    from lpcview.server import Catalog
+    from lpc_view.server import Catalog
 
     cat = Catalog([sample_las])
     assert cat.add_files([sample_las]) == []  # already there: no repeat
@@ -75,11 +104,11 @@ def test_catalog_add_files(sample_las, sample_laz, tmp_path):
 
 
 def test_add_files_shows_in_the_api(sample_las, sample_laz):
-    srv = make_server([sample_las], port=0)
+    srv = make_server([sample_las], port=0, token=TOKEN)
     thread = threading.Thread(target=srv.serve_forever, daemon=True)
     thread.start()
     try:
-        url = srv.url.rstrip("/")
+        url = srv.base_url.rstrip("/")
         assert len(json.loads(get(url + "/api/files")[1])) == 1
         assert srv.catalog.add_files([sample_laz]) == [1]
         files = json.loads(get(url + "/api/files")[1])
@@ -93,7 +122,7 @@ def test_add_files_shows_in_the_api(sample_las, sample_laz):
 
 def test_static_and_files(server):
     status, body, ctype = get(server + "/")
-    assert status == 200 and b"<title>lpcview</title>" in body
+    assert status == 200 and b"<title>lpc_view</title>" in body
     status, body, ctype = get(server + "/static/app.js")
     assert status == 200 and "javascript" in ctype
     status, body, _ = get(server + "/static/vendor/three.module.js")

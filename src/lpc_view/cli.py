@@ -1,4 +1,4 @@
-"""Command line: `lpcview app [files]`, `lpcview serve <files or dirs>` and `lpcview info <file>`."""
+"""Command line: `lpc_view app [files]`, `lpc_view serve <files or dirs>` and `lpc_view info <file>`."""
 
 from __future__ import annotations
 
@@ -87,8 +87,8 @@ def print_info(meta: dict[str, Any], stats: dict[str, Any] | None) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="lpcview", description="View and inspect LAS/LAZ point clouds.")
-    parser.add_argument("--version", action="version", version=f"lpcview {__version__}")
+    parser = argparse.ArgumentParser(prog="lpc_view", description="View and inspect LAS/LAZ point clouds.")
+    parser.add_argument("--version", action="version", version=f"lpc_view {__version__}")
     sub = parser.add_subparsers(dest="command", required=True)
 
     p_app = sub.add_parser("app", help="open the viewer in a window of its own")
@@ -99,7 +99,6 @@ def main(argv: list[str] | None = None) -> int:
 
     p_serve = sub.add_parser("serve", help="start the viewer on a local port")
     p_serve.add_argument("paths", nargs="+", help="LAS/LAZ files or directories of them")
-    p_serve.add_argument("--host", default="127.0.0.1")
     p_serve.add_argument("--port", type=int, default=8765)
     p_serve.add_argument("--open", action="store_true", help="open the page in the default browser")
     p_serve.add_argument("--max-loaded", type=int, default=64,
@@ -118,18 +117,18 @@ def main(argv: list[str] | None = None) -> int:
         try:
             return run(args.paths, max_loaded=args.max_loaded, maximized=not args.no_maximize)
         except FileNotFoundError as exc:
-            print(f"lpcview: not found: {exc}", file=sys.stderr or sys.stdout)
+            print(f"lpc_view: not found: {exc}", file=sys.stderr or sys.stdout)
             return 2
     if args.command == "serve":
         try:
             files = find_files(args.paths)
         except FileNotFoundError as exc:
-            print(f"lpcview: not found: {exc}", file=sys.stderr)
+            print(f"lpc_view: not found: {exc}", file=sys.stderr)
             return 2
         if not files:
-            print("lpcview: no LAS/LAZ files found", file=sys.stderr)
+            print("lpc_view: no LAS/LAZ files found", file=sys.stderr)
             return 2
-        serve(files, host=args.host, port=args.port, open_browser=args.open, max_loaded=args.max_loaded)
+        serve(files, port=args.port, open_browser=args.open, max_loaded=args.max_loaded)
         return 0
     if args.command == "info":
         meta = read_metadata(args.path)

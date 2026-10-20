@@ -1,4 +1,4 @@
-# lpcview
+# lpc_view
 
 View, inspect and fly through LAS/LAZ lidar point clouds, in a window of its own
 or in a browser, from a small local Python server. It shows every piece of metadata a file carries: the
@@ -15,10 +15,10 @@ uv sync
 ```
 
 ```bash
-uv run lpcview app path/to/tile.laz
+uv run lpc_view app path/to/tile.laz
 ```
 
-opens the viewer in a window of its own (maximised, titled lpcview), on a free
+opens the viewer in a window of its own (maximised, titled lpc_view), on a free
 local port. With no files it asks for some with the native file dialog;
 **Open...** in the Files section (or `O`) adds more while it runs. Closing the
 window stops the server. On Windows the window is a WebView2 (Edge) view; see
@@ -27,17 +27,21 @@ window stops the server. On Windows the window is a WebView2 (Edge) view; see
 In a browser instead:
 
 ```bash
-uv run lpcview serve path/to/tile.laz
+uv run lpc_view serve path/to/tile.laz
 ```
 
-Then open <http://127.0.0.1:8765/>. Several files, or a directory of them, can be
-given to either command; the page has a file picker. `--open` opens the page for
-you, `--port` changes the port.
+Then open the URL it prints: `http://127.0.0.1:8765/?token=...`. The server
+binds only to this machine, answers only loopback Host headers, and its API
+takes only requests carrying that token, which the page keeps for its tab. So
+another program or user on the machine, or a web page you visit, cannot read
+your files through it. Several files, or a directory of them, can be given to
+either command; the page has a file picker. `--open` opens the page for you,
+`--port` changes the port.
 
 A quick look without the browser:
 
 ```bash
-uv run lpcview info path/to/tile.laz --stats
+uv run lpc_view info path/to/tile.laz --stats
 ```
 
 `--json` prints the full metadata as JSON.
@@ -82,7 +86,7 @@ uv run lpcview info path/to/tile.laz --stats
 
 ## Building the exe
 
-One file, `dist/lpcview.exe`, with the page, the vendored three.js and the
+One file, `dist/lpc_view.exe`, with the page, the vendored three.js and the
 Python side inside; no console. It is built with PyInstaller (a dev dependency):
 
 ```bash
@@ -91,7 +95,7 @@ uv run python tools/build_exe.py
 
 Double-click it, drop files on it, or set it as the "Open with" program for
 `.laz` and `.las`: an argument that is a path means `app`. From a console it
-takes the same commands as `lpcview`, but being a windowed build it prints
+takes the same commands as `lpc_view`, but being a windowed build it prints
 nothing, so use the uv install for `serve` and `info`. `--console` builds a
 console variant that does print; `--keep-build` keeps PyInstaller's work
 directory for a look at what was collected.
@@ -106,17 +110,17 @@ is needed: Python, laspy, numpy and pyproj are in the exe.
 
 ## Layout
 
-- `src/lpcview/reader.py`: metadata extraction, point decoding, statistics, and
+- `src/lpc_view/reader.py`: metadata extraction, point decoding, statistics, and
   the binary chunk format the viewer streams.
-- `src/lpcview/server.py`: the HTTP server and its API (documented at the top of
+- `src/lpc_view/server.py`: the HTTP server and its API (documented at the top of
   the file).
-- `src/lpcview/app.py`: `lpcview app`, the pywebview window around the server,
+- `src/lpc_view/app.py`: `lpc_view app`, the pywebview window around the server,
   and the `Api` the page calls for the file dialog.
-- `src/lpcview/cli.py`: the `lpcview` command (`app`, `serve`, `info`);
-  `__main__.py` runs it for `python -m lpcview` and the exe.
+- `src/lpc_view/cli.py`: the `lpc_view` command (`app`, `serve`, `info`);
+  `__main__.py` runs it for `python -m lpc_view` and the exe.
 - `tools/build_exe.py`: the PyInstaller build.
-- `src/lpcview/classes.py`: the ASPRS class table and colours.
-- `src/lpcview/static/`: the page, its style, `app.js` (three.js scene, the
+- `src/lpc_view/classes.py`: the ASPRS class table and colours.
+- `src/lpc_view/static/`: the page, its style, `app.js` (three.js scene, the
   grid of cells and their level of detail, fly camera, GPU picking, panels) and
   the vendored three.js r180 (MIT).
 - `tests/`: pytest, on a synthetic LAS/LAZ written with laspy.
@@ -137,14 +141,12 @@ uv run pytest
 - A pick reads one pixel of a render in which each point's colour is its cell id
   (high bits) and index in the cell; the cell maps the index to its stream
   position and the stream's segment table to the file and the file's point.
-- Frame rates, 2026-10-20, on the 16 UCSD tiles (42.3 M points, 2.8 x 3.4 km)
-  in the Claude desktop app's browser pane at 1024 x 768 on an RTX 5080 shared
-  with an Unreal Editor (the pane's frames are not vsynced, so the rates are
-  what the GPU and the page allow):
+- Frame rates, 2026-10-20, on 16 tiles of the USGS San Diego 2014 survey
+  (42.3 M points, 2.8 x 3.4 km) in a 1024 x 768 view on an RTX 5080 with
+  vsync off, so the rates are what the GPU and the page allow:
   - Before (one buffer, every loaded point drawn every frame): 10 M points at
     125-144 fps in every view; 42.3 M at 37 fps from the fit view and 58 fps at
-    eye level. Earlier the same day, with 1.7 GB of RAM free beside a 44 GB
-    Unreal Editor, 42.3 M drew at 2-3 fps and 10 M at 48 fps.
+    eye level.
   - After (cells, culling and the level of detail): 10 M points at the 144 fps
     cap in every view, every visible cell in full; 42.3 M at eye level 122 fps
     still and flying (the frustum keeps 263 of 914 cells, 13.1 M points, under

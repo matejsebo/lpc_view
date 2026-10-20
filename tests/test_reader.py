@@ -3,8 +3,8 @@ import struct
 
 import numpy as np
 
-from lpcview.classes import class_color, class_name
-from lpcview.reader import (
+from lpc_view.classes import class_color, class_name
+from lpc_view.reader import (
     CHUNK_MAGIC,
     CloudSet,
     FLAG_WITHHELD,

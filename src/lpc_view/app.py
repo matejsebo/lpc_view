@@ -1,4 +1,4 @@
-"""`lpcview app`: the viewer in a window of its own.
+"""`lpc_view app`: the viewer in a window of its own.
 
 The HTTP server (server.py) runs on a free localhost port in a background thread;
 a pywebview window (WebView2 on Windows) shows its page. The page reaches back
@@ -16,7 +16,7 @@ from typing import Any
 
 from .server import LpcServer, find_files, make_server, start_in_thread
 
-TITLE = "lpcview"
+TITLE = "lpc_view"
 # pywebview's filter grammar: a description of word characters and spaces, then (*.ext;*.ext).
 FILE_TYPES = ("LAS and LAZ point clouds (*.las;*.laz)", "All files (*.*)")
 
@@ -79,5 +79,5 @@ def run(paths: list[str | Path], max_loaded: int = 64, maximized: bool = True) -
     return 0
 
 
-if __name__ == "__main__":  # a quick manual check: python -m lpcview.app <files>
+if __name__ == "__main__":  # a quick manual check: python -m lpc_view.app <files>
     sys.exit(run(sys.argv[1:]))
