@@ -3,6 +3,7 @@ import struct
 
 import numpy as np
 
+from lpc_view import reader
 from lpc_view.classes import class_color, class_name
 from lpc_view.reader import (
     CHUNK_MAGIC,
@@ -150,3 +151,31 @@ def test_max_points_reads_a_prefix(sample_las):
     full = load_cloud(sample_las)
     assert cloud.count == 50
     assert np.array_equal(cloud.X, full.X[:50])
+
+
+def test_decoding_in_small_chunks_gives_the_same_cloud(sample_laz, monkeypatch):
+    whole = load_cloud(sample_laz)
+    monkeypatch.setattr(reader, "DECODE_CHUNK", 150)  # 7 chunks, the last one partial
+    chunked = load_cloud(sample_laz)
+    prefix = load_cloud(sample_laz, max_points=200)  # stops inside the second chunk
+    assert chunked.count == N_POINTS and prefix.count == 200
+    for name in ("X", "Y", "Z", "intensity", "classification", "scan_angle", "gps_time", "flags", "scanner_channel"):
+        assert np.array_equal(getattr(whole, name), getattr(chunked, name)), name
+        assert np.array_equal(getattr(whole, name)[:200], getattr(prefix, name)), name
+    assert chunked.stats() == whole.stats()
+
+
+def test_block_statistics_match_numpy(monkeypatch):
+    monkeypatch.setattr(reader, "STAT_BLOCK", 1000)  # several blocks over 5000 values
+    rng = np.random.default_rng(7)
+    raw = rng.integers(-50000, 50000, 5000).astype(np.int32)
+    scale, offset = 0.01, 4180000.0
+    v = raw.astype(np.float64) * scale + offset
+    got = reader._ranged(raw, percentiles=(1, 50, 99), bins=16, scale=scale, offset=offset)
+    assert got["min"] == v.min() and got["max"] == v.max()
+    assert np.isclose(got["mean"], v.mean()) and np.isclose(got["std"], v.std())
+    assert np.allclose([got["percentiles"][k] for k in ("1", "50", "99")], np.percentile(v, (1, 50, 99)))
+    counts, edges = np.histogram(v, bins=16)
+    assert got["histogram"] == {"edges": edges.tolist(), "counts": counts.tolist()}
+    codes, counts = reader._value_counts(rng.integers(0, 70000, 5000).astype(np.uint16))
+    assert codes.size > 1000 and counts.sum() == 5000
