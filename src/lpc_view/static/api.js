@@ -6,16 +6,18 @@
 
 let token = "";
 
-// Split a page query into the token and the query that remains once the token is
-// taken out. Pure, so Node can test it.
+// Split a page query into the token, the query that remains once the token is
+// taken out (the ?debug flag among it, so it survives the stripping), and that
+// flag. Pure, so Node can test it.
 export function splitQuery(search) {
   const params = new URLSearchParams(search);
   const t = params.get("token") || "";
   params.delete("token");
-  return { token: t, rest: params.toString() };
+  return { token: t, rest: params.toString(), debug: params.has("debug") };
 }
 
 // Take the token from the page URL (and strip it there) or from the tab's storage.
+// Returns the token and whether the page asked for the debug handle.
 export function bootstrapToken() {
   const q = splitQuery(location.search);
   let t = q.token;
@@ -26,7 +28,7 @@ export function bootstrapToken() {
     try { t = sessionStorage.getItem("lpcToken"); } catch (e) { /* storage may be off */ }
   }
   token = t || "";
-  return token;
+  return { token, debug: q.debug };
 }
 
 export const apiFetch = (url, opts = {}) => fetch(url, { ...opts, headers: { ...(opts.headers || {}), "X-Lpc-Token": token } });

@@ -17,7 +17,7 @@ import { createFlyCamera } from "./camera.js";
 import { createPicker, makeMarker } from "./picking.js";
 import { $, ui, fmt, fmtInt, setStatus, setProgress, createPanels } from "./panels.js";
 
-bootstrapToken();
+const { debug } = bootstrapToken();
 
 // ---------------------------------------------------------------------------
 // Scene
@@ -211,8 +211,10 @@ async function startLoad(ids) {
 
 panels.loadFiles().catch((err) => setStatus(`could not list files: ${err.message}`));
 
-// A handle for debugging from the console.
-window.lpc_view = {
-  pickAt: picker.pickAt, cloud, cam, lod, uniforms, fitView: fly.fitView, topView: fly.topView, eyeLevel: fly.eyeLevel, startLoad,
-  pickBuffer: picker.pickBuffer, get cells() { return cells.group; }, renderer, scene, camera,
-};
+// A handle for debugging from the console, when the page was opened with ?debug.
+if (debug) {
+  window.lpc_view = {
+    pickAt: picker.pickAt, cloud, cam, lod, uniforms, fitView: fly.fitView, topView: fly.topView, eyeLevel: fly.eyeLevel, startLoad,
+    pickBuffer: picker.pickBuffer, get cells() { return cells.group; }, renderer, scene, camera,
+  };
+}
