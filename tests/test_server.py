@@ -1,4 +1,5 @@
 import json
+import socket
 import struct
 import threading
 import urllib.request
@@ -218,3 +219,15 @@ def test_load_refuses_more_files_than_max_loaded(sample_las, sample_laz):
     finally:
         srv.shutdown()
         srv.server_close()
+
+
+def test_busy_port_is_a_one_line_message(sample_las, capsys):
+    from lpc_view.cli import main
+
+    with socket.socket() as taken:
+        taken.bind(("127.0.0.1", 0))
+        taken.listen()
+        port = taken.getsockname()[1]
+        assert main(["serve", str(sample_las), "--port", str(port)]) == 2
+    err = capsys.readouterr().err
+    assert err.count("\n") == 1 and f"port {port}" in err and "--port" in err

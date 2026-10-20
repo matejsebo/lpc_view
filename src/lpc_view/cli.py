@@ -119,6 +119,9 @@ def main(argv: list[str] | None = None) -> int:
         except FileNotFoundError as exc:
             print(f"lpc_view: not found: {exc}", file=sys.stderr or sys.stdout)
             return 2
+        except OSError as exc:
+            print(f"lpc_view: cannot open a local port for the window: {exc}", file=sys.stderr or sys.stdout)
+            return 2
     if args.command == "serve":
         try:
             files = find_files(args.paths)
@@ -128,7 +131,12 @@ def main(argv: list[str] | None = None) -> int:
         if not files:
             print("lpc_view: no LAS/LAZ files found", file=sys.stderr)
             return 2
-        serve(files, port=args.port, open_browser=args.open, max_loaded=args.max_loaded)
+        try:
+            serve(files, port=args.port, open_browser=args.open, max_loaded=args.max_loaded)
+        except OSError as exc:
+            print(f"lpc_view: cannot listen on port {args.port} ({exc.strerror or exc}): "
+                  "is another lpc_view running? Choose another port with --port", file=sys.stderr)
+            return 2
         return 0
     if args.command == "info":
         meta = read_metadata(args.path)
