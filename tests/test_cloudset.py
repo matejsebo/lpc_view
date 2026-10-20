@@ -55,7 +55,7 @@ def test_chunk_carries_segments_and_arrays(pair):
     assert len(blob) == expected
     pos = np.frombuffer(blob, dtype="<f4", count=3 * count, offset=off).reshape(count, 3)
     # The first segment's positions are file 0's points at its local range, relative to the set centre.
-    file_id, a, n = segs[0]
+    _file_id, a, n = segs[0]
     c = pair.clouds[0]
     want = (c.xyz(c.order[a : a + n]) - pair.center).astype(np.float32)
     assert np.allclose(pos[:n], want, atol=1e-3)
@@ -98,3 +98,22 @@ def test_chunk_counts_add_up_to_the_prefix(pair):
         got = sum(n for start in range(0, p, 64) for _, _, n in pair.segments(start, min(64, p - start)))
         assert got == want
     assert sum(n for _, _, n in pair.segments(0, pair.count)) == pair.count
+
+
+def test_merged_rgb_stats(sample_las, tmp_path):
+    from tests.conftest import write_sample
+
+    a = load_cloud(write_sample(tmp_path / "a.las", point_format=7, rgb_scale=257))
+    b = load_cloud(write_sample(tmp_path / "b.las", point_format=7, rgb_scale=1), max_points=250)
+    plain = load_cloud(sample_las)
+    s = CloudSet([0, 1, 2], [a, b, plain]).stats()
+    json.dumps(s)
+    red = np.concatenate([a.rgb[:, 0], b.rgb[:, 0]]).astype(np.float64)
+    got = s["rgb"]["red"]
+    assert (got["min"], got["max"]) == (red.min(), red.max())
+    assert np.isclose(got["mean"], red.mean()) and np.isclose(got["std"], red.std())
+    assert set(got["percentiles"]) == {"1", "50", "99"}
+    assert abs(got["percentiles"]["50"] - np.percentile(red, 50)) <= 2  # every point is in the sample here
+    assert s["rgb_note"] == "16-bit colours scaled to 8-bit / colours are 8-bit in 16-bit fields"
+    assert s["rgb_files"] == [0, 1]
+    assert "rgb" not in CloudSet([2, 3], [plain, load_cloud(sample_las, max_points=10)]).stats()

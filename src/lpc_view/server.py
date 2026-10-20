@@ -4,12 +4,17 @@ Routes:
   GET /                         the viewer page
   GET /static/<file>            its scripts, styles and the vendored three.js
   GET /api/files                the files on offer: id, name, size, point count
-  GET /api/meta?file=<id>       header, VLRs, EVLRs, CRS (no point decoding)
+  GET /api/meta?file=<id>       header, VLRs, EVLRs, CRS (no point decoding);
+                                &safe=1 gives the same JSON with file.path cut to
+                                the file's name, for an export that leaves the
+                                machine (nothing else in it names a local path)
   GET /api/load?files=<id,id,..>
                                 decode those files (once each); returns the merged
-                                statistics, point count and centre
+                                statistics, point count and centre. At most
+                                --max-loaded files in one set (400 above it).
   GET /api/points?files=<id,..>&start=<n>&count=<n>
-                                a binary chunk of the merged stream (reader.CloudSet)
+                                a binary chunk of the merged stream (reader.CloudSet);
+                                count at most MAX_POINTS_PER_REQUEST (400 above it)
   GET /api/point?file=<id>&i=<index in that file's shuffled order>
                                 every attribute of one point, exact, with lat/lon
   GET /api/sha256?file=<id>     the file's SHA-256 (slow on big files)
@@ -44,7 +49,8 @@ from .reader import CloudSet, PointCloud, file_sha256, load_cloud, read_metadata
 STATIC_DIR = Path(__file__).parent / "static"
 LAS_SUFFIXES = {".las", ".laz"}
 LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
-TOKEN_HEADER = "X-Lpc-Token"
+TOKEN_HEADER = "X-Lpc-Token"  # noqa: S105 - the header's name, not a secret
+MAX_POINTS_PER_REQUEST = 2_000_000  # one /api/points chunk; the page asks for 500,000
 
 
 def find_files(paths: list[str | Path]) -> list[Path]:
@@ -69,7 +75,13 @@ def find_files(paths: list[str | Path]) -> list[Path]:
 
 
 class Catalog:
-    """The files on offer and the clouds decoded so far, with one lock per file."""
+    """The files on offer and the clouds decoded so far, with one lock per file.
+
+    At most `max_loaded` clouds stay decoded; past that the least recently used
+    goes, and any cached CloudSet that held it goes with it (the set is rebuilt,
+    and the cloud decoded again, on its next use). A set never has more than
+    `max_loaded` files, so building one cannot evict its own clouds.
+    """
 
     def __init__(self, files: list[Path], max_loaded: int = 64) -> None:
         self.files = files
@@ -77,6 +89,7 @@ class Catalog:
         self._clouds: dict[int, PointCloud] = {}
         self._sets: dict[tuple[int, ...], CloudSet] = {}
         self._meta: dict[int, dict[str, Any]] = {}
+        self._rows: dict[int, tuple[tuple[str, int, int], dict[str, Any]]] = {}  # listing rows by (path, mtime, size)
         self._locks = [threading.Lock() for _ in files]
         self._recent: list[int] = []
         self._transformers: dict[int, Any] = {}
@@ -99,6 +112,7 @@ class Catalog:
                 self.files.append(p)
                 self._locks.append(threading.Lock())
                 new_ids.append(len(self.files) - 1)
+                self._rows.pop(new_ids[-1], None)
         return new_ids
 
     def ids_of(self, paths: list[str | Path]) -> list[int]:
@@ -107,27 +121,39 @@ class Catalog:
         return [i for i, p in enumerate(self.files) if p.resolve() in wanted]
 
     def listing(self) -> list[dict[str, Any]]:
+        """One row per file. The header is read once per (path, mtime, size); only
+        `loaded` is fresh on every call."""
         rows = []
         for i, p in enumerate(self.files):
             try:
-                with laspy.open(p) as r:
-                    count = int(r.header.point_count)
-                    pf = int(r.header.point_format.id)
-                    version = str(r.header.version)
-            except Exception as exc:  # noqa: BLE001
-                count, pf, version = -1, -1, f"error: {exc}"
-            rows.append(
-                {
+                st = p.stat()
+                key = (str(p), st.st_mtime_ns, st.st_size)
+                stat_error = None
+            except OSError as exc:
+                st, key, stat_error = None, (str(p), -1, -1), f"error: {exc}"
+            cached = self._rows.get(i)
+            if cached is None or cached[0] != key:
+                if st is None:
+                    count, pf, version = -1, -1, stat_error
+                else:
+                    try:
+                        with laspy.open(p) as r:
+                            count = int(r.header.point_count)
+                            pf = int(r.header.point_format.id)
+                            version = str(r.header.version)
+                    except Exception as exc:  # a file that is not LAS: say so in its row
+                        count, pf, version = -1, -1, f"error: {exc}"
+                row = {
                     "id": i,
                     "name": p.name,
                     "path": str(p),
-                    "size_bytes": p.stat().st_size,
+                    "size_bytes": st.st_size if st else -1,
                     "point_count": count,
                     "point_format": pf,
                     "version": version,
-                    "loaded": i in self._clouds,
                 }
-            )
+                self._rows[i] = cached = (key, row)
+            rows.append({**cached[1], "loaded": i in self._clouds})
         return rows
 
     def meta(self, i: int) -> dict[str, Any]:
@@ -135,7 +161,8 @@ class Catalog:
             self._meta[i] = read_metadata(self.files[i])
         return self._meta[i]
 
-    def cloud(self, i: int) -> PointCloud:
+    def cloud(self, i: int, keep: tuple[int, ...] = ()) -> PointCloud:
+        """The decoded cloud `i`; `keep` names clouds that must not be evicted to make room."""
         with self._locks[i]:
             if i not in self._clouds:
                 t0 = time.perf_counter()
@@ -146,15 +173,15 @@ class Catalog:
                     f"[lpc_view] decoded {self.files[i].name}: {cloud.count} points"
                     f" in {time.perf_counter() - t0:.1f} s"
                 )
-                self._evict(keep=i)
+                self._evict(keep={i, *keep})
         if i in self._recent:
             self._recent.remove(i)
         self._recent.append(i)
         return self._clouds[i]
 
-    def _evict(self, keep: int) -> None:
+    def _evict(self, keep: set[int]) -> None:
         while len(self._clouds) > self.max_loaded:
-            victim = next((k for k in self._recent if k != keep and k in self._clouds), None)
+            victim = next((k for k in self._recent if k not in keep and k in self._clouds), None)
             if victim is None:
                 break
             del self._clouds[victim]
@@ -165,9 +192,11 @@ class Catalog:
 
     def cloud_set(self, ids: list[int]) -> CloudSet:
         """The clouds of `ids` as one stream; decoded on first use, cached as a set."""
+        if len(ids) > self.max_loaded:
+            raise ValueError(f"{len(ids)} files in one set; at most {self.max_loaded} (--max-loaded) can be loaded at once")
         key = tuple(ids)
         if key not in self._sets:
-            clouds = [self.cloud(i) for i in ids]
+            clouds = [self.cloud(i, keep=key) for i in ids]
             cs = CloudSet(list(ids), clouds)
             cs.stats()
             self._sets[key] = cs
@@ -182,7 +211,7 @@ class Catalog:
             return None
         try:
             lon, lat = tr.transform(x, y)
-        except Exception:  # noqa: BLE001
+        except Exception:  # any failure means no coordinates, not an error
             return None
         return (float(lon), float(lat))
 
@@ -197,7 +226,7 @@ class Catalog:
             if crs.is_compound and crs.sub_crs_list:
                 crs = crs.sub_crs_list[0]
             return pyproj.Transformer.from_crs(crs, "EPSG:4326", always_xy=True)
-        except Exception:  # noqa: BLE001
+        except Exception:  # any failure means no coordinates, not an error
             return None
 
 
@@ -225,6 +254,15 @@ class Handler(SimpleHTTPRequestHandler):
     def _authorised(self, q: dict[str, list[str]]) -> bool:
         given = self.headers.get(TOKEN_HEADER) or (q.get("token") or [""])[0]
         return bool(given) and secrets.compare_digest(given, self.token)
+
+    def end_headers(self) -> None:  # on every response, static files and errors included
+        self.send_header("Referrer-Policy", "no-referrer")  # the token rides in the page's URL
+        self.send_header("X-Content-Type-Options", "nosniff")
+        super().end_headers()
+
+    def list_directory(self, path: Any) -> None:  # no directory listings of static/
+        self.send_error(HTTPStatus.NOT_FOUND)
+        return None
 
     def log_message(self, fmt: str, *args: Any) -> None:  # quieter console
         if self.quiet or sys.stderr is None:  # no console in the windowed build
@@ -277,7 +315,7 @@ class Handler(SimpleHTTPRequestHandler):
 
     # -- routing ---------------------------------------------------------------
 
-    def do_GET(self) -> None:  # noqa: N802 - http.server API
+    def do_GET(self) -> None:  # http.server's name for it
         parts = urlsplit(self.path)
         if not self._host_is_loopback():
             self._send_json({"error": "lpc_view answers only on this machine"}, HTTPStatus.FORBIDDEN)
@@ -287,6 +325,9 @@ class Handler(SimpleHTTPRequestHandler):
             return super().do_GET()
         if parts.path.startswith("/static/"):
             self.path = parts.path[len("/static") :]
+            if Path(self.translate_path(self.path)).is_dir():  # files only, no index or listing
+                self.send_error(HTTPStatus.NOT_FOUND)
+                return None
             return super().do_GET()
         if parts.path.startswith("/api/"):
             q = parse_qs(parts.query, keep_blank_values=True)
@@ -300,7 +341,7 @@ class Handler(SimpleHTTPRequestHandler):
                 self._send_json({"error": f"bad request: {exc}"}, HTTPStatus.BAD_REQUEST)
             except FileNotFoundError as exc:
                 self._send_json({"error": f"not found: {exc}"}, HTTPStatus.NOT_FOUND)
-            except Exception as exc:  # noqa: BLE001 - report, don't crash the thread
+            except Exception as exc:  # report, don't crash the thread
                 self._send_json({"error": f"{type(exc).__name__}: {exc}"},
                                 HTTPStatus.INTERNAL_SERVER_ERROR)
             return
@@ -311,7 +352,10 @@ class Handler(SimpleHTTPRequestHandler):
         if route == "files":
             self._send_json(cat.listing())
         elif route == "meta":
-            self._send_json(cat.meta(self._file_id(q)))
+            meta = cat.meta(self._file_id(q))
+            if (q.get("safe") or ["0"])[0] not in ("", "0", "false"):
+                meta = {**meta, "file": {**meta["file"], "path": meta["file"]["name"]}}
+            self._send_json(meta)
         elif route == "load":
             ids = self._file_ids(q)
             cs = cat.cloud_set(ids)
@@ -327,6 +371,10 @@ class Handler(SimpleHTTPRequestHandler):
             ids = self._file_ids(q)
             start = int(q.get("start", ["0"])[0])
             count = int(q.get("count", ["1000000"])[0])
+            if not 0 <= count <= MAX_POINTS_PER_REQUEST:
+                raise ValueError(f"count must be 0..{MAX_POINTS_PER_REQUEST}")
+            if start < 0:
+                raise ValueError("start must not be negative")
             self._send_bytes(cat.cloud_set(ids).pack_chunk(start, count))
         elif route == "point":
             i = self._file_id(q)

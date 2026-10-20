@@ -1,7 +1,9 @@
 import json
+import socket
 import struct
 import threading
 import urllib.request
+from pathlib import Path
 
 import pytest
 
@@ -23,6 +25,11 @@ def server(sample_las, sample_laz):
 
 
 def get(url: str, token: str | None = TOKEN, host: str | None = None) -> tuple[int, bytes, str]:
+    status, body, headers = get_with_headers(url, token, host)
+    return status, body, headers.get("Content-Type", "")
+
+
+def get_with_headers(url: str, token: str | None = TOKEN, host: str | None = None):
     headers = {}
     if token:
         headers["X-Lpc-Token"] = token
@@ -31,9 +38,9 @@ def get(url: str, token: str | None = TOKEN, host: str | None = None) -> tuple[i
     req = urllib.request.Request(url, headers=headers)
     try:
         with urllib.request.urlopen(req) as r:
-            return r.status, r.read(), r.headers.get("Content-Type", "")
+            return r.status, r.read(), r.headers
     except urllib.error.HTTPError as e:
-        return e.code, e.read(), e.headers.get("Content-Type", "")
+        return e.code, e.read(), e.headers
 
 
 def test_only_this_machine_and_only_with_the_token(server):
@@ -138,6 +145,13 @@ def test_meta_load_points_point(server):
     assert status == 200
     meta = json.loads(body)
     assert meta["file"]["compressed"] is True
+    assert Path(meta["file"]["path"]).is_absolute()
+    # The share-safe export: the same JSON with the path cut to the name.
+    safe = json.loads(get(server + "/api/meta?file=1&safe=1")[1])
+    assert safe["file"]["path"] == safe["file"]["name"] == "sample.laz"
+    assert {**safe, "file": {**safe["file"], "path": meta["file"]["path"]}} == meta
+    assert str(Path(meta["file"]["path"]).parent) not in json.dumps(safe)
+    assert json.loads(get(server + "/api/meta?file=1&safe=0")[1]) == meta
     status, body, _ = get(server + "/api/load?file=1")
     info = json.loads(body)
     assert info["point_count"] == N_POINTS and info["files"] == [1]
@@ -169,6 +183,10 @@ def test_meta_load_points_point(server):
 def test_errors_are_json(server):
     status, body, _ = get(server + "/api/meta?file=9")
     assert status == 400 and "error" in json.loads(body)
+    status, body, _ = get(server + "/api/points?file=0&start=0&count=2000001")
+    assert status == 400 and "count" in json.loads(body)["error"]
+    assert get(server + "/api/points?file=0&start=0&count=2000000")[0] == 200
+    assert get(server + "/api/points?file=0&start=-1&count=10")[0] == 400
     status, body, _ = get(server + "/api/load?files=0,9")
     assert status == 400
     status, body, _ = get(server + "/api/load?files=")
@@ -179,3 +197,108 @@ def test_errors_are_json(server):
     assert status == 404 and "error" in json.loads(body)
     status, _, _ = get(server + "/nothing.html")
     assert status == 404
+    # No directory listings: the static tree is served file by file only.
+    for path in ("/static/", "/static", "/static/vendor/", "/static/vendor"):
+        status, body, _ = get(server + path)
+        assert status == 404 and b"Directory listing" not in body, path
+
+
+def test_eviction_keeps_a_set_whole_and_drops_sets_with_their_clouds(sample_las, sample_laz, tmp_path):
+    from lpc_view.server import Catalog
+
+    (tmp_path / "c.las").write_bytes(sample_las.read_bytes())
+    cat = Catalog([sample_las, sample_laz, tmp_path / "c.las"], max_loaded=2)
+    # A set larger than max_loaded is refused (400 through the API) rather than evicting its own clouds.
+    with pytest.raises(ValueError):
+        cat.cloud_set([0, 1, 2])
+    pair = cat.cloud_set([1, 2])
+    assert set(cat._clouds) == {1, 2} and (1, 2) in cat._sets
+    # Loading a third cloud evicts the least recently used one, and the set that held it.
+    cat.cloud(1)  # 1 is now more recent than 2
+    cat.cloud(0)
+    assert set(cat._clouds) == {0, 1} and (1, 2) not in cat._sets
+    # The set comes back on its next use, with its missing cloud decoded again.
+    again = cat.cloud_set([1, 2])
+    assert again is not pair and again.count == pair.count
+    assert set(cat._clouds) == {1, 2}  # 0 went to make room for 2, not 1: the set's own clouds are kept
+    assert cat.cloud_set([1, 2]) is again
+
+
+def test_load_refuses_more_files_than_max_loaded(sample_las, sample_laz):
+    srv = make_server([sample_las, sample_laz], port=0, token=TOKEN, max_loaded=1)
+    thread = threading.Thread(target=srv.serve_forever, daemon=True)
+    thread.start()
+    try:
+        url = srv.base_url.rstrip("/")
+        status, body, _ = get(url + "/api/load?files=0,1")
+        assert status == 400 and "max-loaded" in json.loads(body)["error"]
+        assert get(url + "/api/load?files=1")[0] == 200
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+def test_busy_port_is_a_one_line_message(sample_las, capsys):
+    from lpc_view.cli import main
+
+    with socket.socket() as taken:
+        taken.bind(("127.0.0.1", 0))
+        taken.listen()
+        port = taken.getsockname()[1]
+        assert main(["serve", str(sample_las), "--port", str(port)]) == 2
+    err = capsys.readouterr().err
+    assert err.count("\n") == 1 and f"port {port}" in err and "--port" in err
+
+
+def test_every_response_carries_the_safety_headers(server):
+    for path, token in (("/", None), ("/static/app.js", None), ("/api/files", TOKEN), ("/api/files", None),
+                        ("/api/points?file=0&count=10", TOKEN), ("/nothing.html", None), ("/static/", None)):
+        status, _, headers = get_with_headers(server + path, token=token)
+        assert headers["Referrer-Policy"] == "no-referrer", (path, status)
+        assert headers["X-Content-Type-Options"] == "nosniff", (path, status)
+
+
+def test_listing_reads_each_header_once_until_the_file_changes(sample_las, sample_laz, tmp_path, monkeypatch):
+    import os
+
+    import laspy
+
+    from lpc_view.server import Catalog
+
+    opened = []
+    real_open = laspy.open
+    monkeypatch.setattr(laspy, "open", lambda p, *a, **k: opened.append(Path(p).name) or real_open(p, *a, **k))
+    cat = Catalog([sample_las, sample_laz])
+    first = cat.listing()
+    assert opened == ["sample.las", "sample.laz"]
+    assert cat.listing() == first and opened == ["sample.las", "sample.laz"]  # cached
+    cat.cloud(1)  # decoding opens the file too, once
+    assert cat.listing()[1]["loaded"] is True  # but `loaded` is live
+    assert opened == ["sample.las", "sample.laz", "sample.laz"]
+    opened.clear()
+    # A changed file (newer mtime) is read again; an added file is read on its first listing.
+    copy = tmp_path / "c.las"
+    copy.write_bytes(sample_las.read_bytes())
+    assert cat.add_files([copy]) == [2]
+    st = sample_laz.stat()
+    os.utime(sample_laz, ns=(st.st_atime_ns, st.st_mtime_ns + 2_000_000_000))
+    rows = cat.listing()
+    assert [r["name"] for r in rows] == ["sample.las", "sample.laz", "c.las"] and rows[2]["point_count"] == N_POINTS
+    assert opened == ["sample.laz", "c.las"]
+    assert cat.listing() == rows and len(opened) == 2
+
+
+def test_listing_reports_a_vanished_or_broken_file_in_its_row(sample_las, tmp_path):
+    from lpc_view.server import Catalog
+
+    gone = tmp_path / "gone.las"
+    gone.write_bytes(sample_las.read_bytes())
+    junk = tmp_path / "junk.laz"
+    junk.write_bytes(b"not a point cloud")
+    cat = Catalog([sample_las, gone, junk])
+    gone.unlink()
+    rows = cat.listing()
+    assert rows[0]["point_count"] == N_POINTS
+    assert rows[1]["point_count"] == -1 and rows[1]["version"].startswith("error:") and rows[1]["size_bytes"] == -1
+    assert rows[2]["point_count"] == -1 and rows[2]["version"].startswith("error:")
+    assert cat.listing() == rows

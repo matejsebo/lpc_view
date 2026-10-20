@@ -1,5 +1,9 @@
 """The window's Python side (lpc_view.app) without a window: the Api and the argv rules."""
 
+import pytest
+
+pytest.importorskip("webview")  # the `app` extra
+
 from lpc_view.app import Api
 from lpc_view.cli import normalise_argv
 from lpc_view.server import make_server

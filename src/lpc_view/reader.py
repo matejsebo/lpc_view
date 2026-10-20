@@ -24,7 +24,7 @@ import numpy as np
 from .classes import class_color, class_name
 
 CHUNK_MAGIC = b"LPC2"
-GPS_EPOCH = dt.datetime(1980, 1, 6, tzinfo=dt.timezone.utc)
+GPS_EPOCH = dt.datetime(1980, 1, 6, tzinfo=dt.UTC)
 GPS_UTC_LEAP_SECONDS = 18  # since 2017-01-01; the LAS header does not say
 ADJUSTED_GPS_OFFSET = 1.0e9
 
@@ -79,7 +79,7 @@ def _describe_vlr(vlr: Any) -> dict[str, Any]:
     kind = type(vlr).__name__
     try:
         raw = bytes(vlr.record_data_bytes())
-    except Exception:  # noqa: BLE001 - a VLR type without raw access
+    except Exception:  # a VLR type without raw access
         raw = b""
     out: dict[str, Any] = {
         "user_id": vlr.user_id,
@@ -146,9 +146,8 @@ def _parse_laszip_vlr(raw: bytes) -> dict[str, Any]:
     compressor, coder, vmaj, vmin, vrev, options, chunk_size = struct.unpack_from(
         "<HHBBHII", raw, 0
     )
-    num_special, num_items = struct.unpack_from("<qq", raw, 16)[0:1] + (
-        struct.unpack_from("<H", raw, 32)[0],
-    )
+    num_special = struct.unpack_from("<q", raw, 16)[0]  # then the offset to them (i64), not shown
+    num_items = struct.unpack_from("<H", raw, 32)[0]
     items = []
     off = 34
     item_names = {
@@ -195,7 +194,7 @@ def _parse_laszip_vlr(raw: bytes) -> dict[str, Any]:
 def _crs_info(header: laspy.LasHeader) -> dict[str, Any] | None:
     try:
         crs = header.parse_crs()
-    except Exception as exc:  # noqa: BLE001 - laspy raises assorted errors on odd VLRs
+    except Exception as exc:  # laspy raises assorted errors on odd VLRs
         return {"error": f"could not parse: {exc}"}
     if crs is None:
         return None
@@ -208,7 +207,7 @@ def _crs_info(header: laspy.LasHeader) -> dict[str, Any] | None:
         }
         try:
             d["datum"] = c.datum.name if c.datum is not None else None
-        except Exception:  # noqa: BLE001
+        except Exception:  # pyproj: whatever it cannot say, leave out
             d["datum"] = None
         try:
             d["axes"] = [
@@ -220,11 +219,11 @@ def _crs_info(header: laspy.LasHeader) -> dict[str, Any] | None:
                 }
                 for a in c.axis_info
             ]
-        except Exception:  # noqa: BLE001
+        except Exception:  # pyproj: whatever it cannot say, leave out
             d["axes"] = []
         try:
             d["area_of_use"] = str(c.area_of_use) if c.area_of_use else None
-        except Exception:  # noqa: BLE001
+        except Exception:  # pyproj: whatever it cannot say, leave out
             d["area_of_use"] = None
         return d
 
@@ -234,7 +233,7 @@ def _crs_info(header: laspy.LasHeader) -> dict[str, Any] | None:
     info["is_compound"] = bool(crs.is_compound)
     try:
         info["wkt"] = crs.to_wkt(pretty=True)
-    except Exception:  # noqa: BLE001
+    except Exception:  # pyproj: whatever it cannot say, leave out
         info["wkt"] = None
     return info
 
@@ -257,6 +256,10 @@ def read_metadata(path: str | os.PathLike[str]) -> dict[str, Any]:
     """Everything the file says about itself, without decoding any points."""
     path = Path(path)
     st = path.stat()
+    with open(path, "rb") as f:
+        head = f.read(96)
+    # The public header's own size field (bytes 94-95), as the file states it.
+    header_size = struct.unpack_from("<H", head, 94)[0] if len(head) >= 96 else None
     with laspy.open(path) as reader:
         h = reader.header
         evlrs = list(reader.evlrs or [])
@@ -301,9 +304,7 @@ def read_metadata(path: str | os.PathLike[str]) -> dict[str, Any]:
             "system_identifier": h.system_identifier,
             "generating_software": h.generating_software,
             "creation_date": h.creation_date.isoformat() if h.creation_date else None,
-            "header_size": int(h.offset_to_point_data) - len(h.extra_header_bytes or b"")
-            - sum(54 + len(v.record_data_bytes()) for v in h.vlrs)
-            - len(h.extra_vlr_bytes or b""),
+            "header_size": header_size,
             "offset_to_point_data": int(h.offset_to_point_data),
             "number_of_vlrs": len(h.vlrs),
             "point_data_record_format": int(pf.id),
@@ -383,6 +384,7 @@ class PointCloud:
     rgb: np.ndarray | None  # uint8 N x 3 or None
     nir: np.ndarray | None
     gps_time_type: str
+    rgb_note: str | None = None  # how the file's colour fields were read, see load_cloud
     class_lookup: dict[int, str] = field(default_factory=dict)
     order: np.ndarray = field(default=None)  # type: ignore[assignment]
     _stats: dict[str, Any] | None = field(default=None, repr=False)
@@ -391,7 +393,8 @@ class PointCloud:
         if self.order is None:
             # A fixed shuffle so every prefix of the stream is a uniform sample.
             rng = np.random.default_rng(12345)
-            self.order = rng.permutation(self.count).astype(np.uint32)
+            self.order = np.arange(self.count, dtype=np.uint32)
+            rng.shuffle(self.order)  # the same permutation as rng.permutation(n), without its int64 copy
 
     # -- derived coordinates --------------------------------------------------
 
@@ -495,44 +498,23 @@ class PointCloud:
             return out
 
         def counts_of(values: np.ndarray, limit: int = 256) -> list[dict[str, Any]]:
-            codes, cnt = np.unique(values, return_counts=True)
+            codes, cnt = _value_counts(values)
             rows = [
                 {"value": int(c), "count": int(k), "fraction": float(k) / n}
-                for c, k in zip(codes, cnt)
+                for c, k in zip(codes, cnt, strict=True)
             ]
             rows.sort(key=lambda r: -r["count"])
             return rows[:limit]
 
-        def ranged(values: np.ndarray, percentiles=(1, 5, 50, 95, 99)) -> dict[str, Any]:
-            v = values.astype(np.float64)
-            q = np.percentile(v, percentiles)
-            return {
-                "min": float(v.min()),
-                "max": float(v.max()),
-                "mean": float(v.mean()),
-                "std": float(v.std()),
-                "percentiles": {str(p): float(x) for p, x in zip(percentiles, q)},
-            }
-
-        def histogram(values: np.ndarray, bins: int = 64) -> dict[str, Any]:
-            counts, edges = np.histogram(values.astype(np.float64), bins=bins)
-            return {"edges": edges.tolist(), "counts": counts.tolist()}
-
-        x = self.X.astype(np.float64) * self.scale[0] + self.offset[0]
-        y = self.Y.astype(np.float64) * self.scale[1] + self.offset[1]
-        z = self.Z.astype(np.float64) * self.scale[2] + self.offset[2]
-        out["bounds"] = {
-            "min": [float(x.min()), float(y.min()), float(z.min())],
-            "max": [float(x.max()), float(y.max()), float(z.max())],
-        }
-        area = (x.max() - x.min()) * (y.max() - y.min())
+        # One axis at a time: a float64 copy of all three would be 24 bytes a point.
+        xmin, xmax = _scaled_range(self.X, self.scale[0], self.offset[0])
+        ymin, ymax = _scaled_range(self.Y, self.scale[1], self.offset[1])
+        out["z"] = _ranged(self.Z, bins=64, scale=self.scale[2], offset=self.offset[2])
+        out["bounds"] = {"min": [xmin, ymin, out["z"]["min"]], "max": [xmax, ymax, out["z"]["max"]]}
+        area = (xmax - xmin) * (ymax - ymin)
         out["density_per_m2"] = float(n / area) if area > 0 else None
-        out["z"] = ranged(z)
-        out["z"]["histogram"] = histogram(z)
-        out["intensity"] = ranged(self.intensity)
-        out["intensity"]["histogram"] = histogram(self.intensity)
-        out["scan_angle_deg"] = ranged(self.scan_angle, percentiles=(1, 50, 99))
-        out["scan_angle_deg"]["histogram"] = histogram(self.scan_angle, bins=45)
+        out["intensity"] = _ranged(self.intensity, bins=64)
+        out["scan_angle_deg"] = _ranged(self.scan_angle, percentiles=(1, 50, 99), bins=45)
 
         classes = []
         for row in counts_of(self.classification):
@@ -548,7 +530,7 @@ class PointCloud:
         out["return_number"] = counts_of(self.return_number)
         out["number_of_returns"] = counts_of(self.number_of_returns)
         out["point_source_id"] = counts_of(self.point_source_id, limit=64)
-        out["point_source_id_unique"] = int(np.unique(self.point_source_id).size)
+        out["point_source_id_unique"] = int(_value_counts(self.point_source_id)[0].size)
         out["user_data"] = counts_of(self.user_data, limit=16)
         if self.scanner_channel is not None:
             out["scanner_channel"] = counts_of(self.scanner_channel)
@@ -560,78 +542,227 @@ class PointCloud:
             "edge_of_flight_line": int(np.count_nonzero(self.flags & FLAG_EDGE_OF_FLIGHT_LINE)),
             "scan_direction_positive": int(np.count_nonzero(self.flags & FLAG_SCAN_DIRECTION)),
         }
-        ground = self.classification == 2
-        out["ground_points"] = int(np.count_nonzero(ground))
+        out["ground_points"] = int(np.count_nonzero(self.classification == 2))
         out["ground_density_per_m2"] = float(out["ground_points"] / area) if area > 0 else None
         if self.gps_time is not None:
-            t = self.gps_time
+            t = _ranged(self.gps_time, percentiles=(), bins=96)
             out["gps_time"] = {
                 "type": self.gps_time_type,
-                "min": float(t.min()),
-                "max": float(t.max()),
-                "span_seconds": float(t.max() - t.min()),
-                "min_utc": gps_time_to_utc(float(t.min()), self.gps_time_type),
-                "max_utc": gps_time_to_utc(float(t.max()), self.gps_time_type),
+                "min": t["min"],
+                "max": t["max"],
+                "mean": t["mean"],
+                "std": t["std"],
+                "span_seconds": t["max"] - t["min"],
+                "min_utc": gps_time_to_utc(t["min"], self.gps_time_type),
+                "max_utc": gps_time_to_utc(t["max"], self.gps_time_type),
                 "leap_seconds_assumed": GPS_UTC_LEAP_SECONDS,
-                "histogram": histogram(t, bins=96),
+                "histogram": t["histogram"],
             }
         if self.rgb is not None:
             out["rgb"] = {
-                c: ranged(self.rgb[:, k], percentiles=(1, 50, 99))
+                c: _ranged(self.rgb[:, k], percentiles=(1, 50, 99))
                 for k, c in enumerate(("red", "green", "blue"))
             }
+            if self.rgb_note:
+                out["rgb_note"] = self.rgb_note
         if self.nir is not None:
-            out["nir"] = ranged(self.nir, percentiles=(1, 50, 99))
+            out["nir"] = _ranged(self.nir, percentiles=(1, 50, 99))
         return out
 
 
-def _dim(las: laspy.LasData, name: str, dtype: Any, default: Any = 0) -> np.ndarray:
-    if name in las.point_format.dimension_names:
-        return np.asarray(las[name]).astype(dtype)
-    return np.full(len(las.points), default, dtype=dtype)
+# -- statistics without a float64 copy of the whole array ----------------------
+
+STAT_BLOCK = 1 << 20  # points per block in the passes below
+
+
+def _blocks(values: np.ndarray, scale: float = 1.0, offset: float = 0.0):
+    """`values * scale + offset` as float64, one block at a time."""
+    for a in range(0, len(values), STAT_BLOCK):
+        v = values[a : a + STAT_BLOCK].astype(np.float64)
+        if scale != 1.0:
+            v *= scale
+        if offset != 0.0:
+            v += offset
+        yield v
+
+
+def _scaled_range(values: np.ndarray, scale: float = 1.0, offset: float = 0.0) -> tuple[float, float]:
+    return float(values.min()) * scale + offset, float(values.max()) * scale + offset
+
+
+def _value_counts(values: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """The distinct values and their counts (np.unique without the sort for small ints)."""
+    if values.dtype.kind == "u" and values.dtype.itemsize <= 2:
+        counts = np.zeros(1 << (8 * values.dtype.itemsize), dtype=np.int64)
+        for a in range(0, len(values), STAT_BLOCK):  # bincount casts its input to int64: by blocks
+            counts += np.bincount(values[a : a + STAT_BLOCK], minlength=len(counts))
+        codes = np.flatnonzero(counts)
+        return codes, counts[codes]
+    return np.unique(values, return_counts=True)
+
+
+def _histogram(values: np.ndarray, edges: np.ndarray, scale: float = 1.0, offset: float = 0.0) -> np.ndarray:
+    counts = np.zeros(len(edges) - 1, dtype=np.int64)
+    for v in _blocks(values, scale, offset):
+        counts += np.histogram(v, bins=edges)[0]
+    return counts
+
+
+def _edges(lo: float, hi: float, bins: int) -> np.ndarray:
+    """np.histogram's bin edges for `bins` bins over [lo, hi]."""
+    if hi <= lo:
+        lo, hi = lo - 0.5, hi + 0.5
+    return np.linspace(lo, hi, bins + 1)
+
+
+def _ranged(
+    values: np.ndarray,
+    percentiles: tuple[int, ...] = (1, 5, 50, 95, 99),
+    bins: int | None = None,
+    scale: float = 1.0,
+    offset: float = 0.0,
+) -> dict[str, Any]:
+    """min, max, mean, std, percentiles (and a histogram when `bins` is given) of
+    `values * scale + offset`, with no float64 copy of the whole array: the
+    moments and the histogram come from block passes, the percentiles from
+    np.percentile on the stored values (a copy of their own size), scaled after.
+    """
+    n = len(values)
+    lo, hi = _scaled_range(values, scale, offset)
+    raw_mean = float(values.mean(dtype=np.float64))
+    ss = 0.0
+    for v in _blocks(values):
+        v -= raw_mean
+        ss += float(np.dot(v, v))
+    out: dict[str, Any] = {
+        "min": lo,
+        "max": hi,
+        "mean": raw_mean * scale + offset,
+        "std": math.sqrt(ss / n) * scale,
+    }
+    if percentiles:
+        q = np.percentile(values, percentiles)
+        out["percentiles"] = {str(p): float(x) * scale + offset for p, x in zip(percentiles, q, strict=True)}
+    if bins:
+        edges = _edges(lo, hi, bins)
+        out["histogram"] = {"edges": edges.tolist(), "counts": _histogram(values, edges, scale, offset).tolist()}
+    return out
+
+
+# -- decoding --------------------------------------------------------------------
+
+DECODE_CHUNK = 1_000_000  # points decoded at a time
+
+
+def _open(path: Path) -> laspy.LasReader:
+    if laspy.LazBackend.LazrsParallel.is_available():
+        return laspy.open(path, laz_backend=laspy.LazBackend.LazrsParallel)
+    return laspy.open(path)
 
 
 def load_cloud(path: str | os.PathLike[str], max_points: int | None = None) -> PointCloud:
-    """Decode a file's points. `max_points` keeps the first that many (for tests)."""
+    """Decode a file's points. `max_points` keeps the first that many (for tests).
+
+    The file is read in chunks of `DECODE_CHUNK` points straight into arrays of
+    the final dtypes, so the peak memory is the result plus one chunk, not the
+    whole file as laspy's wide records plus a copy of every dimension.
+    """
     path = Path(path)
-    backend = laspy.LazBackend.LazrsParallel if laspy.LazBackend.LazrsParallel.is_available() else None
-    if max_points is None:
-        las = laspy.read(path, laz_backend=backend) if backend else laspy.read(path)
-    else:
-        with laspy.open(path, laz_backend=backend) if backend else laspy.open(path) as reader:
-            las = reader.read_points(max_points)
-            header = reader.header
-        las = laspy.LasData(header, las)
-    h = las.header
-    n = len(las.points)
-    names = set(las.point_format.dimension_names)
+    with _open(path) as reader:
+        h = reader.header
+        names = set(h.point_format.dimension_names)
+        n = int(h.point_count) if max_points is None else min(max_points, int(h.point_count))
+        has_rgb = {"red", "green", "blue"} <= names
+        fine_scan = "scan_angle" in names  # point formats 6-10: 0.006 degree units
 
-    flags = np.zeros(n, dtype=np.uint8)
-    for name, bit in (
-        ("synthetic", FLAG_SYNTHETIC),
-        ("key_point", FLAG_KEY_POINT),
-        ("withheld", FLAG_WITHHELD),
-        ("overlap", FLAG_OVERLAP),
-        ("edge_of_flight_line", FLAG_EDGE_OF_FLIGHT_LINE),
-        ("scan_direction_flag", FLAG_SCAN_DIRECTION),
-    ):
-        if name in names:
-            flags |= (np.asarray(las[name]).astype(bool) * bit).astype(np.uint8)
+        raw_x = np.empty(n, dtype=np.int32)
+        raw_y = np.empty(n, dtype=np.int32)
+        raw_z = np.empty(n, dtype=np.int32)
+        intensity = np.zeros(n, dtype=np.uint16)
+        classification = np.zeros(n, dtype=np.uint8)
+        return_number = np.zeros(n, dtype=np.uint8)
+        number_of_returns = np.zeros(n, dtype=np.uint8)
+        point_source_id = np.zeros(n, dtype=np.uint16)
+        user_data = np.zeros(n, dtype=np.uint8)
+        scan_angle = np.zeros(n, dtype=np.float32)
+        flags = np.zeros(n, dtype=np.uint8)
+        gps_time = np.empty(n, dtype=np.float64) if "gps_time" in names else None
+        scanner_channel = np.empty(n, dtype=np.uint8) if "scanner_channel" in names else None
+        rgb16 = np.empty((n, 3), dtype=np.uint16) if has_rgb else None
+        nir = np.empty(n, dtype=np.uint16) if "nir" in names else None
+        plain = [
+            (name, arr)
+            for name, arr in (
+                ("intensity", intensity),
+                ("classification", classification),
+                ("return_number", return_number),
+                ("number_of_returns", number_of_returns),
+                ("point_source_id", point_source_id),
+                ("user_data", user_data),
+                ("gps_time", gps_time),
+                ("scanner_channel", scanner_channel),
+                ("nir", nir),
+            )
+            if arr is not None and name in names
+        ]
+        flag_bits = [
+            (name, bit)
+            for name, bit in (
+                ("synthetic", FLAG_SYNTHETIC),
+                ("key_point", FLAG_KEY_POINT),
+                ("withheld", FLAG_WITHHELD),
+                ("overlap", FLAG_OVERLAP),
+                ("edge_of_flight_line", FLAG_EDGE_OF_FLIGHT_LINE),
+                ("scan_direction_flag", FLAG_SCAN_DIRECTION),
+            )
+            if name in names
+        ]
 
-    if "scan_angle" in names:  # point formats 6-10: 0.006 degree units
-        scan = np.asarray(las.scan_angle).astype(np.float32) * np.float32(0.006)
-    else:  # formats 0-5: whole degrees
-        scan = _dim(las, "scan_angle_rank", np.float32)
+        pos = 0
+        for chunk in reader.chunk_iterator(DECODE_CHUNK):
+            if pos >= n:
+                break
+            m = min(len(chunk), n - pos)
+            sl = slice(pos, pos + m)
+            raw_x[sl] = np.asarray(chunk["X"])[:m]
+            raw_y[sl] = np.asarray(chunk["Y"])[:m]
+            raw_z[sl] = np.asarray(chunk["Z"])[:m]
+            for name, arr in plain:
+                arr[sl] = np.asarray(chunk[name])[:m]
+            for name, bit in flag_bits:
+                flags[sl] |= (np.asarray(chunk[name])[:m].astype(bool) * np.uint8(bit)).astype(np.uint8)
+            if fine_scan:
+                scan_angle[sl] = np.asarray(chunk["scan_angle"])[:m].astype(np.float32) * np.float32(0.006)
+            elif "scan_angle_rank" in names:
+                scan_angle[sl] = np.asarray(chunk["scan_angle_rank"])[:m]
+            if rgb16 is not None:
+                for k, name in enumerate(("red", "green", "blue")):
+                    rgb16[sl, k] = np.asarray(chunk[name])[:m]
+            pos += m
+
+    if pos < n:  # the header promised more points than the file holds
+        n = pos
+        raw_x, raw_y, raw_z = raw_x[:n].copy(), raw_y[:n].copy(), raw_z[:n].copy()
+        intensity, classification = intensity[:n].copy(), classification[:n].copy()
+        return_number, number_of_returns = return_number[:n].copy(), number_of_returns[:n].copy()
+        point_source_id, user_data = point_source_id[:n].copy(), user_data[:n].copy()
+        scan_angle, flags = scan_angle[:n].copy(), flags[:n].copy()
+        gps_time = gps_time[:n].copy() if gps_time is not None else None
+        scanner_channel = scanner_channel[:n].copy() if scanner_channel is not None else None
+        rgb16 = rgb16[:n].copy() if rgb16 is not None else None
+        nir = nir[:n].copy() if nir is not None else None
 
     rgb = None
-    if {"red", "green", "blue"} <= names:
-        r = np.asarray(las.red).astype(np.uint16)
-        g = np.asarray(las.green).astype(np.uint16)
-        b = np.asarray(las.blue).astype(np.uint16)
-        # 16-bit colour when any channel exceeds 255, else already 8-bit.
-        shift = 8 if max(int(r.max()), int(g.max()), int(b.max())) > 255 else 0
-        rgb = np.column_stack([r >> shift, g >> shift, b >> shift]).astype(np.uint8)
-    nir = np.asarray(las.nir).astype(np.uint16) if "nir" in names else None
+    rgb_note = None
+    if rgb16 is not None:
+        # The LAS colour fields are 16-bit; some writers put 8-bit values in them.
+        # 16-bit colour when any channel exceeds 255 (scaled down), else kept as is.
+        shift = 8 if (n and int(rgb16.max()) > 255) else 0
+        rgb_note = "16-bit colours scaled to 8-bit" if shift else "colours are 8-bit in 16-bit fields"
+        rgb = np.empty((n, 3), dtype=np.uint8)
+        for k in range(3):
+            rgb[:, k] = rgb16[:, k] >> shift
+        del rgb16
 
     ge = h.global_encoding
     gps_type = "week" if ge.gps_time_type == laspy.header.GpsTimeType.WEEK_TIME else "standard"
@@ -648,24 +779,23 @@ def load_cloud(path: str | os.PathLike[str], max_points: int | None = None) -> P
         scale=np.asarray(h.scales, dtype=np.float64),
         offset=np.asarray(h.offsets, dtype=np.float64),
         center=(mins + maxs) / 2.0,
-        X=np.asarray(las.X).astype(np.int32),
-        Y=np.asarray(las.Y).astype(np.int32),
-        Z=np.asarray(las.Z).astype(np.int32),
-        intensity=_dim(las, "intensity", np.uint16),
-        classification=_dim(las, "classification", np.uint8),
-        return_number=_dim(las, "return_number", np.uint8),
-        number_of_returns=_dim(las, "number_of_returns", np.uint8),
-        point_source_id=_dim(las, "point_source_id", np.uint16),
-        scan_angle=scan,
-        gps_time=np.asarray(las.gps_time).astype(np.float64) if "gps_time" in names else None,
+        X=raw_x,
+        Y=raw_y,
+        Z=raw_z,
+        intensity=intensity,
+        classification=classification,
+        return_number=return_number,
+        number_of_returns=number_of_returns,
+        point_source_id=point_source_id,
+        scan_angle=scan_angle,
+        gps_time=gps_time,
         flags=flags,
-        user_data=_dim(las, "user_data", np.uint8),
-        scanner_channel=np.asarray(las.scanner_channel).astype(np.uint8)
-        if "scanner_channel" in names
-        else None,
+        user_data=user_data,
+        scanner_channel=scanner_channel,
         rgb=rgb,
         nir=nir,
         gps_time_type=gps_type,
+        rgb_note=rgb_note,
         class_lookup=lookup,
     )
 
@@ -681,12 +811,17 @@ STREAM_FIELDS = (
 SAMPLE_PER_CLOUD = 1_000_000  # points per file behind the merged percentiles
 
 
-def _values(cloud: PointCloud, name: str) -> np.ndarray | None:
+RGB_CHANNELS = ("red", "green", "blue")
+
+
+def _raw(cloud: PointCloud, name: str) -> tuple[np.ndarray, float, float] | None:
+    """The stored array behind a ranged statistic and the scale and offset to apply."""
     if name == "z":
-        return cloud.Z.astype(np.float64) * cloud.scale[2] + cloud.offset[2]
-    if name == "gps_time":
-        return cloud.gps_time
-    return getattr(cloud, name)
+        return cloud.Z, float(cloud.scale[2]), float(cloud.offset[2])
+    if name in RGB_CHANNELS:
+        return None if cloud.rgb is None else (cloud.rgb[:, RGB_CHANNELS.index(name)], 1.0, 0.0)
+    arr = getattr(cloud, name)
+    return None if arr is None else (arr, 1.0, 0.0)
 
 
 class CloudSet:
@@ -767,7 +902,7 @@ class CloudSet:
         n = self.count
         out: dict[str, Any] = {
             "point_count": n,
-            "files": [{"id": i, "name": Path(c.path).name, "count": c.count} for i, c in zip(self.ids, self.clouds)],
+            "files": [{"id": i, "name": Path(c.path).name, "count": c.count} for i, c in zip(self.ids, self.clouds, strict=True)],
         }
         if n == 0:
             return out
@@ -778,35 +913,46 @@ class CloudSet:
         out["density_per_m2"] = float(n / area) if area > 0 else None
         out["density_note"] = "over the bounding box of all files"
 
-        def merged_ranged(name: str, bins: int, percentiles=(1, 5, 50, 95, 99)) -> dict[str, Any] | None:
-            have = [c for c in clouds if _values(c, name) is not None]
+        def merged_ranged(name: str, key: str, bins: int | None, percentiles=(1, 5, 50, 95, 99)) -> dict[str, Any] | None:
+            """The files' `key` statistics (a dotted path into stats()) as one: exact
+            moments, an exact histogram when `bins` is given, sampled percentiles."""
+            have = [(c, _raw(c, name)) for c in clouds if _raw(c, name) is not None]
             if not have:
                 return None
-            arrays = [_values(c, name).astype(np.float64) for c in have]
-            lo = min(float(v.min()) for v in arrays)
-            hi = max(float(v.max()) for v in arrays)
-            counts = np.array([c.count for c in have], dtype=np.float64)
-            means = np.array([float(v.mean()) for v in arrays])
-            stds = np.array([float(v.std()) for v in arrays])
+            per = []
+            for c, _ in have:
+                st: Any = c.stats()
+                for part in key.split("."):
+                    st = st[part]
+                per.append(st)
+            lo = min(s["min"] for s in per)
+            hi = max(s["max"] for s in per)
+            counts = np.array([c.count for c, _ in have], dtype=np.float64)
+            means = np.array([s["mean"] for s in per])
+            stds = np.array([s["std"] for s in per])
             mean = float((counts * means).sum() / counts.sum())
             var = float((counts * (stds**2 + (means - mean) ** 2)).sum() / counts.sum())
-            edges = np.linspace(lo, hi if hi > lo else lo + 1.0, bins + 1)
-            hist = np.zeros(bins, dtype=np.int64)
+            edges = _edges(lo, hi, bins) if bins else None
+            hist = np.zeros(bins or 0, dtype=np.int64)
             samples = []
-            for c, v in zip(have, arrays):
-                hist += np.histogram(v, bins=edges)[0]
-                samples.append(v[c.order[: min(c.count, SAMPLE_PER_CLOUD)]])
+            for c, (arr, scale, offset) in have:
+                if edges is not None:
+                    hist += _histogram(arr, edges, scale, offset)
+                idx = c.order[: min(c.count, SAMPLE_PER_CLOUD)]
+                samples.append(arr[idx].astype(np.float64) * scale + offset)
             q = np.percentile(np.concatenate(samples), percentiles)
-            return {
+            out = {
                 "min": lo, "max": hi, "mean": mean, "std": math.sqrt(var),
-                "percentiles": {str(p): float(x) for p, x in zip(percentiles, q)},
+                "percentiles": {str(p): float(x) for p, x in zip(percentiles, q, strict=True)},
                 "percentiles_note": f"from a sample of up to {SAMPLE_PER_CLOUD} points per file",
-                "histogram": {"edges": edges.tolist(), "counts": hist.tolist()},
             }
+            if edges is not None:
+                out["histogram"] = {"edges": edges.tolist(), "counts": hist.tolist()}
+            return out
 
-        out["z"] = merged_ranged("z", 64)
-        out["intensity"] = merged_ranged("intensity", 64)
-        out["scan_angle_deg"] = merged_ranged("scan_angle", 45, percentiles=(1, 50, 99))
+        out["z"] = merged_ranged("z", "z", 64)
+        out["intensity"] = merged_ranged("intensity", "intensity", 64)
+        out["scan_angle_deg"] = merged_ranged("scan_angle", "scan_angle_deg", 45, percentiles=(1, 50, 99))
 
         def merged_counts(key: str, limit: int = 256) -> list[dict[str, Any]]:
             acc: dict[int, int] = {}
@@ -839,7 +985,7 @@ class CloudSet:
         out["ground_density_per_m2"] = float(out["ground_points"] / area) if area > 0 else None
         timed = [c for c in clouds if c.gps_time is not None]
         if timed:
-            g = merged_ranged("gps_time", 96, percentiles=(1, 50, 99))
+            g = merged_ranged("gps_time", "gps_time", 96, percentiles=(1, 50, 99))
             types = {c.gps_time_type for c in timed}
             gtype = types.pop() if len(types) == 1 else "mixed"
             out["gps_time"] = {
@@ -851,11 +997,12 @@ class CloudSet:
             }
         coloured = [c for c in clouds if c.rgb is not None]
         if coloured:
-            out["rgb"] = {}
-            for k, name in enumerate(("red", "green", "blue")):
-                vals = [c.rgb[:, k] for c in coloured]
-                out["rgb"][name] = {
-                    "min": min(int(v.min()) for v in vals), "max": max(int(v.max()) for v in vals),
-                    "mean": float(np.mean([float(v.mean()) for v in vals])), "std": 0.0, "percentiles": {},
-                }
+            out["rgb"] = {
+                name: merged_ranged(name, f"rgb.{name}", None, percentiles=(1, 50, 99)) for name in RGB_CHANNELS
+            }
+            notes = sorted({c.rgb_note for c in coloured if c.rgb_note})
+            if notes:
+                out["rgb_note"] = " / ".join(notes)
+            if len(coloured) < len(clouds):
+                out["rgb_files"] = [i for i, c in zip(self.ids, self.clouds, strict=True) if c.rgb is not None]
         return out

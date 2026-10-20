@@ -3,19 +3,55 @@ name = "lpc_view"
 version = "0.1.0"
 description = "View, inspect and fly through LAS/LAZ lidar point clouds"
 readme = "README.md"
-requires-python = ">=3.13"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Matej Šebo" }]
+requires-python = ">=3.12"
+keywords = ["lidar", "las", "laz", "point cloud", "viewer", "laspy", "three.js"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Web Environment",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: GIS",
+    "Topic :: Scientific/Engineering :: Visualization",
+]
 dependencies = [
     "laspy[lazrs]>=2.7.0",
     "numpy>=2.5.4",
     "pyproj>=3.8.0",
+]
+
+[project.optional-dependencies]
+# `lpc_view app`, the viewer in a window of its own (and the exe build): uv sync --extra app
+app = [
     "pywebview>=6.2.1",
 ]
+
+[project.urls]
+Repository = "https://github.com/matejsebo/lpc_view"
+Issues = "https://github.com/matejsebo/lpc_view/issues"
 
 [project.scripts]
 lpc_view = "lpc_view.cli:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 120
+src = ["src", "tests", "tools"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "B", "UP", "S", "N", "SIM", "RUF"]
+ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S101", "S310", "S104", "S105", "S106"]
 
 [build-system]
 requires = ["uv_build>=0.12.23,<0.13.0"]

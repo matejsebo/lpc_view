@@ -83,7 +83,7 @@ def print_info(meta: dict[str, Any], stats: dict[str, Any] | None) -> None:
             print(f"  gps time ({g['type']}): {g['min']:.3f} .. {g['max']:.3f}"
                   f"  ({g['span_seconds']:.0f} s)  {g['min_utc']} .. {g['max_utc']}")
         fl = stats["flags"]
-        print(f"  flags: " + ", ".join(f"{k} {v}" for k, v in fl.items()))
+        print("  flags: " + ", ".join(f"{k} {v}" for k, v in fl.items()))
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -116,8 +116,18 @@ def main(argv: list[str] | None = None) -> int:
 
         try:
             return run(args.paths, max_loaded=args.max_loaded, maximized=not args.no_maximize)
+        except ModuleNotFoundError as exc:
+            if exc.name != "webview":
+                raise
+            print("lpc_view: the window needs pywebview, the `app` extra: uv sync --extra app"
+                  " (or pip install 'lpc_view[app]'); `lpc_view serve` works without it",
+                  file=sys.stderr or sys.stdout)
+            return 2
         except FileNotFoundError as exc:
             print(f"lpc_view: not found: {exc}", file=sys.stderr or sys.stdout)
+            return 2
+        except OSError as exc:
+            print(f"lpc_view: cannot open a local port for the window: {exc}", file=sys.stderr or sys.stdout)
             return 2
     if args.command == "serve":
         try:
@@ -128,7 +138,12 @@ def main(argv: list[str] | None = None) -> int:
         if not files:
             print("lpc_view: no LAS/LAZ files found", file=sys.stderr)
             return 2
-        serve(files, port=args.port, open_browser=args.open, max_loaded=args.max_loaded)
+        try:
+            serve(files, port=args.port, open_browser=args.open, max_loaded=args.max_loaded)
+        except OSError as exc:
+            print(f"lpc_view: cannot listen on port {args.port} ({exc.strerror or exc}): "
+                  "is another lpc_view running? Choose another port with --port", file=sys.stderr)
+            return 2
         return 0
     if args.command == "info":
         meta = read_metadata(args.path)
