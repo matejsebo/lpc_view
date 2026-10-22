@@ -15,6 +15,7 @@ import { createShading } from "./shaders.js";
 import { createCells, capBudget, chunkCount, NEAR_ALL } from "./cells.js";
 import { createFlyCamera } from "./camera.js";
 import { createPicker, makeMarker } from "./picking.js";
+import { createOcclusion } from "./occlusion.js";
 import { $, ui, fmt, fmtInt, setStatus, setProgress, createPanels } from "./panels.js";
 
 const { debug } = bootstrapToken();
@@ -51,6 +52,7 @@ const fly = createFlyCamera({ THREE, canvas, camera, ui, cloud, cells, actions }
 const { cam } = fly;
 const panels = createPanels({ cloud, cam, marker, shading });
 const picker = createPicker({ THREE, renderer, scene, camera, canvas, cloud, shading, marker, cells, panels, ui });
+const occlusion = createOcclusion({ THREE, renderer, scene, camera, shading, cells, marker });
 Object.assign(actions, { pickAt: picker.pickAt, togglePanels: panels.togglePanels, openFiles: panels.openFiles, setStatus });
 
 function resize() {
@@ -76,6 +78,7 @@ function frame(now) {
   fly.applyCamera();
   cells.updateLod(fly.cameraMoved(), now, frameMs);
   cells.applyLod();
+  occlusion.render();
   renderer.render(scene, camera);
   frames++;
   if (now - fpsT > 500) {
@@ -104,6 +107,7 @@ requestAnimationFrame(frame);
 ui.mode.addEventListener("change", () => (uniforms.uMode.value = Number(ui.mode.value)));
 ui.size.addEventListener("input", () => { uniforms.uSize.value = Number(ui.size.value); ui.sizeOut.textContent = ui.size.value; });
 ui.adaptive.addEventListener("change", () => (uniforms.uAdaptive.value = ui.adaptive.checked ? 1 : 0));
+ui.occlude.addEventListener("change", () => occlusion.setEnabled(ui.occlude.checked));
 ui.bounds.addEventListener("change", () => { if (cells.boundsHelper) cells.boundsHelper.visible = ui.bounds.checked; });
 ui.hideWithheld.addEventListener("change", () => (uniforms.uHideWithheld.value = ui.hideWithheld.checked ? 1 : 0));
 ui.hideOverlap.addEventListener("change", () => (uniforms.uHideOverlap.value = ui.hideOverlap.checked ? 1 : 0));
@@ -233,7 +237,7 @@ panels.loadFiles().catch((err) => setStatus(`could not list files: ${err.message
 
 // A handle for debugging from the console, when the page was opened with ?debug.
 if (debug) {
-  window.lpc_view = {
+  window.lpc_view = { occlusion,
     pickAt: picker.pickAt, cloud, cam, lod, uniforms, fitView: fly.fitView, topView: fly.topView, eyeLevel: fly.eyeLevel, startLoad,
     pickBuffer: picker.pickBuffer, get cells() { return cells.group; }, renderer, scene, camera, ingestMs,
   };

@@ -19,6 +19,7 @@ export const ui = {
   size: $("size-range"),
   sizeOut: $("size-out"),
   adaptive: $("adaptive-check"),
+  occlude: $("occlude-check"),
   bounds: $("bounds-check"),
   zrange: $("zrange-select"),
   hideWithheld: $("hide-withheld"),

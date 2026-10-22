@@ -66,6 +66,8 @@ uniform float uPickSize;
 uniform float uMaxSize;
 uniform int uCellId;
 uniform int uLocalBits;
+uniform float uOcclude;
+uniform float uOccSplat;
 
 bool hiddenPoint() {
   vec4 cls = texture(uClassTex, vec2((classification + 0.5) / 256.0, 0.5));
@@ -94,6 +96,7 @@ ${VERTEX_COMMON}
 ${COLOR_FUNCS}
 out vec3 vColor;
 out float vSize;
+out float vViewZ;
 
 vec3 shade() {
   if (uMode == 0) return turbo((position.z - uZMin) / max(uZMax - uZMin, 1e-6));
@@ -115,33 +118,82 @@ vec3 shade() {
 }
 
 void main() {
-  if (hiddenPoint()) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); gl_PointSize = 0.0; vSize = 0.0; vColor = vec3(0.0); return; }
+  if (hiddenPoint()) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); gl_PointSize = 0.0; vSize = 0.0; vColor = vec3(0.0); vViewZ = 0.0; return; }
   vec4 mv = modelViewMatrix * vec4(position, 1.0);
   gl_Position = projectionMatrix * mv;
   vSize = pointSizeFor(mv, uSize);
   gl_PointSize = vSize;
+  vViewZ = -mv.z;
   vColor = shade();
+}
+`;
+
+// The occlusion test for fragment shaders: with uOcclude on, a fragment farther than
+// the depth surface at its pixel by more than the tolerance is discarded. The
+// tolerance is a fixed distance plus a share of the surface's distance, which also
+// absorbs the depth buffer's coarseness far from the camera.
+export const OCCLUSION_FRAGMENT = /* glsl */ `
+uniform float uOcclude;
+uniform sampler2D uDepthTex;
+uniform vec2 uViewport;
+uniform vec2 uNearFar;
+uniform float uOccTol;
+uniform float uOccFrac;
+float surfaceDepth() {
+  float d = texture(uDepthTex, gl_FragCoord.xy / uViewport).r;
+  return (uNearFar.x * uNearFar.y) / (uNearFar.y - d * (uNearFar.y - uNearFar.x));
+}
+bool behindSurface(float viewZ) {
+  if (uOcclude < 0.5) return false;
+  float s = surfaceDepth();
+  return viewZ > s + uOccTol + uOccFrac * s;
 }
 `;
 
 export const FRAGMENT_SHADER = /* glsl */ `
 precision highp float;
+${OCCLUSION_FRAGMENT}
 in vec3 vColor;
 in float vSize;
+in float vViewZ;
 out vec4 outColor;
 void main() {
   if (vSize > 2.5) { vec2 c = gl_PointCoord - 0.5; if (dot(c, c) > 0.25) discard; }
+  if (behindSurface(vViewZ)) discard;
   outColor = vec4(vColor, 1.0);
+}
+`;
+
+// The occluder pass: every drawn point as a round splat of uOccSplat pixels, depth only.
+export const OCCLUDER_VERTEX = /* glsl */ `
+${VERTEX_COMMON}
+void main() {
+  if (hiddenPoint()) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); gl_PointSize = 0.0; return; }
+  vec4 mv = modelViewMatrix * vec4(position, 1.0);
+  gl_Position = projectionMatrix * mv;
+  gl_PointSize = uOccSplat;
+}
+`;
+
+export const OCCLUDER_FRAGMENT = /* glsl */ `
+precision highp float;
+out vec4 outColor;
+void main() {
+  vec2 c = gl_PointCoord - 0.5;
+  if (dot(c, c) > 0.25) discard;
+  outColor = vec4(1.0);
 }
 `;
 
 export const PICK_VERTEX = /* glsl */ `
 ${VERTEX_COMMON}
 flat out vec4 vPick;
+out float vViewZ;
 void main() {
-  if (hiddenPoint()) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); gl_PointSize = 0.0; vPick = vec4(1.0); return; }
+  if (hiddenPoint()) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); gl_PointSize = 0.0; vPick = vec4(1.0); vViewZ = 0.0; return; }
   vec4 mv = modelViewMatrix * vec4(position, 1.0);
   gl_Position = projectionMatrix * mv;
+  vViewZ = -mv.z;
   gl_PointSize = max(pointSizeFor(mv, uSize), uPickSize);
   // The pick colour is the cell id in the high bits and the index in the cell below.
   uint id = (uint(uCellId) << uint(uLocalBits)) | uint(gl_VertexID);
@@ -151,9 +203,11 @@ void main() {
 
 export const PICK_FRAGMENT = /* glsl */ `
 precision highp float;
+${OCCLUSION_FRAGMENT}
 flat in vec4 vPick;
+in float vViewZ;
 out vec4 outColor;
-void main() { outColor = vPick; }
+void main() { if (behindSurface(vViewZ)) discard; outColor = vPick; }
 `;
 
 // The colour ramps as one RGBA texture: row 0 turbo, row 1 viridis, RGBA so that
@@ -197,6 +251,14 @@ export function createShading(THREE) {
     uMaxSize: { value: 8 },
     uCellId: { value: 0 },
     uLocalBits: { value: 32 },
+    // Occlusion (occlusion.js): off until the toggle; the depth texture is made on first use.
+    uOcclude: { value: 0 },
+    uOccSplat: { value: 5 },
+    uOccTol: { value: 1.0 },
+    uOccFrac: { value: 0.01 },
+    uDepthTex: { value: null },
+    uViewport: { value: new THREE.Vector2(1, 1) },
+    uNearFar: { value: new THREE.Vector2(0.2, 100000) },
   };
 
   const material = new THREE.ShaderMaterial({
@@ -205,5 +267,9 @@ export function createShading(THREE) {
   const pickMaterial = new THREE.ShaderMaterial({
     uniforms, vertexShader: PICK_VERTEX, fragmentShader: PICK_FRAGMENT, glslVersion: THREE.GLSL3, blending: THREE.NoBlending,
   });
-  return { uniforms, material, pickMaterial, classTex, classTexData, rampTex };
+  const occluderMaterial = new THREE.ShaderMaterial({
+    uniforms, vertexShader: OCCLUDER_VERTEX, fragmentShader: OCCLUDER_FRAGMENT, glslVersion: THREE.GLSL3,
+    blending: THREE.NoBlending, colorWrite: false,
+  });
+  return { uniforms, material, pickMaterial, occluderMaterial, classTex, classTexData, rampTex };
 }
