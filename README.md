@@ -75,14 +75,18 @@ uv run lpc_view info path/to/tile.laz --stats
   target; once the camera is still it grows until every visible cell draws
   everything. The HUD shows the points and cells drawn and the distance.
   "Bigger when near" enlarges points up to 8 px (times the pixel ratio).
-- **Hide points behind relief** (off by default): the cloud is first drawn as
-  fat depth-only splats into a half-resolution depth texture, which closes the
-  gaps between points into a surface, and the main pass then drops any point
-  more than 1 m plus 1 % of its distance behind that surface. A hillside no
-  longer shows the valley beyond it through its own points, and the pick
-  honours the same surface. The extra pass uses half of each cell's drawn
-  points as 6 px splats and costs about a quarter of the frame at a full
-  10 M point draw; while flying, the level of detail absorbs it.
+- **Hide points behind relief** (off by default): a terrain surface is built
+  from the loaded points (the lowest point of every 2 m cell, ground-classified
+  returns first, then eroded over 2 cells so that bumps narrower than about
+  8 m, such as tree crowns, sink to the ground beside them) and drawn depth-only
+  into a half-resolution depth texture before each frame; the main pass drops
+  any point more than 1 m plus 1 % of its distance behind that surface, and the
+  pick honours the same surface. Only the ground hides: a valley beyond a ridge
+  goes, a tree behind a tree stays. Building the terrain for 10 M points takes
+  about 150 ms and happens when the toggle goes on and again after a load
+  grows the cloud; drawing it costs almost nothing. With `?debug` in the URL,
+  `lpc_view.occlusion.params` holds the cell size, erosion radius and
+  tolerances (call `lpc_view.occlusion.rebuild()` after changing them).
 - **Colour by** elevation, intensity, classification, return number, number of
   returns, point source id, GPS time, scan angle, RGB (when the file has it), or
   single/first/last return.

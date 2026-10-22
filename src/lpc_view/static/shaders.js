@@ -67,7 +67,6 @@ uniform float uMaxSize;
 uniform int uCellId;
 uniform int uLocalBits;
 uniform float uOcclude;
-uniform float uOccSplat;
 
 bool hiddenPoint() {
   vec4 cls = texture(uClassTex, vec2((classification + 0.5) / 256.0, 0.5));
@@ -164,27 +163,6 @@ void main() {
 }
 `;
 
-// The occluder pass: every drawn point as a round splat of uOccSplat pixels, depth only.
-export const OCCLUDER_VERTEX = /* glsl */ `
-${VERTEX_COMMON}
-void main() {
-  if (hiddenPoint()) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); gl_PointSize = 0.0; return; }
-  vec4 mv = modelViewMatrix * vec4(position, 1.0);
-  gl_Position = projectionMatrix * mv;
-  gl_PointSize = uOccSplat;
-}
-`;
-
-export const OCCLUDER_FRAGMENT = /* glsl */ `
-precision highp float;
-out vec4 outColor;
-void main() {
-  vec2 c = gl_PointCoord - 0.5;
-  if (dot(c, c) > 0.25) discard;
-  outColor = vec4(1.0);
-}
-`;
-
 export const PICK_VERTEX = /* glsl */ `
 ${VERTEX_COMMON}
 flat out vec4 vPick;
@@ -253,7 +231,6 @@ export function createShading(THREE) {
     uLocalBits: { value: 32 },
     // Occlusion (occlusion.js): off until the toggle; the depth texture is made on first use.
     uOcclude: { value: 0 },
-    uOccSplat: { value: 5 },
     uOccTol: { value: 1.0 },
     uOccFrac: { value: 0.01 },
     uDepthTex: { value: null },
@@ -267,9 +244,5 @@ export function createShading(THREE) {
   const pickMaterial = new THREE.ShaderMaterial({
     uniforms, vertexShader: PICK_VERTEX, fragmentShader: PICK_FRAGMENT, glslVersion: THREE.GLSL3, blending: THREE.NoBlending,
   });
-  const occluderMaterial = new THREE.ShaderMaterial({
-    uniforms, vertexShader: OCCLUDER_VERTEX, fragmentShader: OCCLUDER_FRAGMENT, glslVersion: THREE.GLSL3,
-    blending: THREE.NoBlending, colorWrite: false,
-  });
-  return { uniforms, material, pickMaterial, occluderMaterial, classTex, classTexData, rampTex };
+  return { uniforms, material, pickMaterial, classTex, classTexData, rampTex };
 }

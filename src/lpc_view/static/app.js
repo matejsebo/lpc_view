@@ -52,7 +52,7 @@ const fly = createFlyCamera({ THREE, canvas, camera, ui, cloud, cells, actions }
 const { cam } = fly;
 const panels = createPanels({ cloud, cam, marker, shading });
 const picker = createPicker({ THREE, renderer, scene, camera, canvas, cloud, shading, marker, cells, panels, ui });
-const occlusion = createOcclusion({ THREE, renderer, scene, camera, shading, cells, marker });
+const occlusion = createOcclusion({ THREE, renderer, scene, camera, shading, cloud, marker });
 Object.assign(actions, { pickAt: picker.pickAt, togglePanels: panels.togglePanels, openFiles: panels.openFiles, setStatus });
 
 function resize() {
